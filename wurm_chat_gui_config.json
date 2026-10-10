@@ -1,0 +1,10 @@
+{
+  "logs_dir": "E:/SteamLibrary/steamapps/common/Wurm Online/gamedata/players/Uggabuga/logs",
+  "translate": true,
+  "sound": false,
+  "notify": false,
+  "on_top": false,
+  "show_original": false,
+  "sound_file": "",
+  "target_lang": "ru"
+}

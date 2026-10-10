@@ -2,6 +2,8 @@
 
 Переводчик чатов для игры **Wurm Online**. Отслеживает текстовые логи игры и показывает сообщения по каналам во вкладках, с переводом на русский.
 
+[![Скачать WurmChatTranslator.exe](https://img.shields.io/badge/Скачать-WurmChatTranslator.exe-0066ff)](https://github.com/UggaBuga/wurm-chat-translator/releases/latest/download/WurmChatTranslator.exe)
+
 ![Скриншот](screenshot.png)
 
 ## Возможности

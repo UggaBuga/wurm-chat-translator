@@ -42,6 +42,13 @@ import urllib.parse
 import urllib.request
 import xml.sax.saxutils
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    HAVE_TRAY = True
+except Exception:                     # pystray не обязателен — без него просто выход
+    HAVE_TRAY = False
+
 APP_TITLE = "Wurm Chat — переводчик"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
@@ -605,6 +612,15 @@ def save_config(cfg):
 # Графический интерфейс
 # --------------------------------------------------------------------------- #
 
+def make_tray_icon():
+    """Синяя плашка с белой «W» из линий — 64x64."""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((2, 2, 62, 62), radius=12, fill=(0, 102, 255, 255))
+    d.line((18, 18, 26, 46, 32, 30, 38, 46, 46, 18), fill=(255, 255, 255, 255), width=5, joint="curve")
+    return img
+
+
 def run_gui():
     import tkinter as tk
     from tkinter import filedialog, scrolledtext, ttk
@@ -840,6 +856,21 @@ def run_gui():
     def poll():
         try:
             supervise()
+            # команды из трея (потокобезопасно: только tk-виджеты)
+            while True:
+                cmd = tray_cmds.get_nowait()
+                if cmd == "show":
+                    _show_window()
+                elif cmd == "quit":
+                    stop()
+                    collect_cfg()
+                    try:
+                        if tray_icon[0] is not None:
+                            tray_icon[0].stop()
+                    except Exception:
+                        pass
+                    root.destroy()
+                    return
             while True:
                 item = state["done"].get_nowait()
                 if item[0] == "error":
@@ -863,10 +894,40 @@ def run_gui():
             status_var.set(f"Ошибка вывода: {exc!r}")
         root.after(100, poll)
 
+    tray_icon = [None]   # список, чтобы замыкание могло заменить значение
+    tray_cmds = queue.Queue()   # команды из потока трея → в цикл poll (потокобезопасно)
+
+    def tray_quit():
+        tray_cmds.put("quit")
+
+    def tray_show():
+        tray_cmds.put("show")
+
+    def _show_window():
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+
     def on_close():
-        stop()
-        collect_cfg()
-        root.destroy()
+        # Крестик — свернуть в трей, полный выход — через меню иконки.
+        if HAVE_TRAY and tray_icon[0] is not None:
+            root.withdraw()
+        else:
+            tray_quit()
+
+    if HAVE_TRAY:
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem("Показать", lambda *_: tray_show(), default=True),
+                pystray.MenuItem("Выход", lambda *_: tray_quit()),
+            )
+            icon = pystray.Icon("WurmChatTranslator", make_tray_icon(),
+                                APP_TITLE, menu)
+            tray_icon[0] = icon
+            threading.Thread(target=icon.run, daemon=True).start()
+        except Exception as exc:
+            log_debug(f"трей недоступен: {exc!r}")
+            tray_icon[0] = None
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     switch_tab(CHANNELS[0][0])      # поднять первую вкладку

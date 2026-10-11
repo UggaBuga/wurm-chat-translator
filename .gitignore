@@ -1,4 +1,6 @@
 __pycache__/
 _smoke/
 build/
+dist/
+curlbin/
 *.log

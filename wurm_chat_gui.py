@@ -50,6 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
+APP_VERSION = "1.1.1"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -84,7 +85,7 @@ def _find_existing_hwnd():
     def cb(h, l):
         buf = ctypes.create_unicode_buffer(256)
         user32.GetWindowTextW(h, buf, 256)
-        if buf.value == APP_TITLE:
+        if buf.value.startswith(APP_TITLE):
             pid = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
             if pid.value and pid.value != os.getpid():
@@ -141,6 +142,29 @@ def _excepthook(exc_type, exc, tb):
 
 
 sys.excepthook = _excepthook
+
+# Репозиторий проекта — для проверки обновлений
+GITHUB_REPO = "UggaBuga/wurm-chat-translator"
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases"
+LATEST_EXE_URL = (f"https://github.com/{GITHUB_REPO}/releases/latest/"
+                  f"download/WurmChatTranslator.exe")
+
+
+def parse_version(text):
+    """'v1.1.1' / '1.1.1' -> (1, 1, 1). Нечисловое -> None."""
+    m = re.search(r"(\d+(?:\.\d+)+)", text or "")
+    return tuple(int(p) for p in m.group(1).split(".")) if m else None
+
+
+def check_latest_release(timeout=8):
+    """Версия последнего релиза на GitHub или None (сеть/ошибка)."""
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        data = json.loads(_http_get(url, timeout=timeout))
+        return parse_version(data.get("tag_name") or data.get("name"))
+    except Exception as exc:
+        log_debug(f"проверка обновлений: не удалось: {exc!r}")
+        return None
 
 # Корень установки Wurm Online (Steam). Подпапка игрока подставляется автоматически.
 WURM_PLAYERS_ROOTS = [
@@ -814,7 +838,7 @@ def run_gui():
     cfg = load_config()
 
     root = tk.Tk()
-    root.title(APP_TITLE)
+    root.title(f"{APP_TITLE} v{APP_VERSION}")
     root.geometry("760x560")
     root.minsize(560, 380)
 
@@ -903,11 +927,67 @@ def run_gui():
     def active_tab_name():
         return current_tab["name"]
 
+    # ---------------- панель обратного перевода (RU → EN) ----------------
+    reply = ttk.Frame(root)
+    reply.pack(fill="x", padx=8, pady=(2, 0))
+    ttk.Label(reply, text="Ответ RU→EN:").pack(side="left")
+    reply_var = tk.StringVar()
+    reply_entry = ttk.Entry(reply, textvariable=reply_var, width=40)
+    reply_entry.pack(side="left", padx=(4, 8))
+    reply_out_var = tk.StringVar(value="")
+    reply_out = ttk.Entry(reply, textvariable=reply_out_var, state="readonly",
+                          foreground="#005a9e")
+    reply_out.pack(side="left", fill="x", expand=True)
+
+    reply_state = {"after": None, "seq": 0}
+
+    def reply_translate_async(text):
+        """Перевод в фоне, результат — в GUI-поток."""
+        seq = reply_state["seq"]
+        try:
+            result, _lang = translate_auto(text, dst="en")
+        except Exception:
+            result = None
+        root.after(0, lambda: reply_show_result(text, result, seq))
+
+    def reply_show_result(text, result, seq):
+        if seq != reply_state["seq"]:
+            return          # устаревший запрос — текст уже изменился
+        if result is None:
+            reply_out_var.set("(не удалось перевести)")
+            return
+        reply_out_var.set(result)
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(result)
+            status_var.set(f"Скопировано в буфер: {result[:60]}")
+        except Exception:
+            pass
+
+    def reply_on_change(*_args):
+        text = reply_var.get().strip()
+        reply_state["seq"] += 1
+        if reply_state["after"] is not None:
+            root.after_cancel(reply_state["after"])
+            reply_state["after"] = None
+        if not text:
+            reply_out_var.set("")
+            return
+        # переводим через 0,7 с после последней введённой буквы
+        reply_state["after"] = root.after(
+            700, lambda: threading.Thread(
+                target=reply_translate_async, args=(text,), daemon=True).start())
+
+    reply_var.trace_add("write", reply_on_change)
+
     # ---------------- нижняя панель ----------------
     bottom = ttk.Frame(root)
     bottom.pack(fill="x", padx=8, pady=(2, 8))
     status_var = tk.StringVar(value="Остановлено")
     ttk.Label(bottom, textvariable=status_var).pack(side="left")
+    # номер версии — тихий уголок справа
+    ttk.Label(bottom, text=f"v{APP_VERSION}",
+              foreground="#999999").pack(side="right", padx=(4, 0))
     run_btn = ttk.Button(bottom, text="▶ Старт")
     run_btn.pack(side="right", padx=4)
     def clear_all():
@@ -1204,10 +1284,37 @@ def run_gui():
             log_debug(f"трей недоступен: {exc!r}")
             tray_icon[0] = None
 
+    def check_updates_silent():
+        """Фоновая проверка обновлений; диалог — только если есть новее."""
+        def work():
+            latest = check_latest_release()
+            if latest is None:
+                return
+            mine = parse_version(APP_VERSION)
+            if mine is None or latest <= mine:
+                return
+            root.after(0, lambda: offer_update(latest))
+        threading.Thread(target=work, daemon=True).start()
+
+    def offer_update(latest):
+        import tkinter.messagebox as mb
+        newer = ".".join(str(x) for x in latest)
+        if mb.askyesno(
+                APP_TITLE,
+                f"Доступна новая версия v{newer} (у вас v{APP_VERSION}).\n\n"
+                f"Открыть страницу загрузки?\n"
+                f"(Скачанный exe можно положить поверх старого — настройки сохранятся)",
+                icon="info"):
+            try:
+                os.startfile(RELEASES_PAGE)
+            except Exception as exc:
+                log_debug(f"не удалось открыть страницу релизов: {exc!r}")
+
     root.protocol("WM_DELETE_WINDOW", on_close)
     switch_tab(CHANNELS[0][0])      # поднять первую вкладку
     root.after(100, poll)
     root.after(300, start)          # слежение запускается сразу при старте
+    root.after(5000, check_updates_silent)   # проверка обновлений — в фоне
     root.mainloop()
 
 

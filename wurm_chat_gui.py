@@ -202,6 +202,35 @@ NAME_TOKEN_RE = re.compile(r"(<[^<>\r\n]+>)")
 # --------------------------------------------------------------------------- #
 
 GTX_LAST_ERROR = None  # "429", если Google отказал по частоте запросов
+# «Аварийный выключатель»: после серии 429 Google отключается на время,
+# чтобы очередь не простаивала по 15+ секунд на каждом сообщении.
+GTX_BANNED_UNTIL = 0.0       # monotonic, до которого gtx не дёргаем
+GTX_FAILS = 0                # подряд идущих 429
+GTX_BAN_THRESHOLD = 3        # столько 429 подряд → бан
+GTX_BAN_SECONDS = 1800       # бан на 30 минут
+
+
+def _http_get(url, timeout=GTX_TIMEOUT):
+    """GET-запрос с текстовым ответом. Через curl, если он есть (Google по TLS-
+    отпечатку банит urllib — 429, тогда как curl проходит), иначе через urllib."""
+    curl = None
+    if platform.system() == "Windows":
+        for cand in (r"C:\Windows\System32\curl.exe", "curl.exe"):
+            if os.path.isfile(cand):
+                curl = cand
+                break
+    if curl:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        out = subprocess.run(
+            [curl, "-sS", "--max-time", str(timeout), "-A",
+             "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", url],
+            capture_output=True, creationflags=creationflags, timeout=timeout + 5)
+        if out.returncode == 0 and out.stdout:
+            return out.stdout.decode("utf-8", "replace")
+        raise RuntimeError(f"curl exit={out.returncode}: {out.stderr[:120]!r}")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
 
 
 def google_gtx_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
@@ -215,10 +244,7 @@ def google_gtx_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
     params = urllib.parse.urlencode({"client": "gtx", "sl": "auto", "tl": dst,
                                      "dt": "t", "q": text})
     try:
-        req = urllib.request.Request(f"{GTX_URL}?{params}",
-                                     headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
+        data = json.loads(_http_get(f"{GTX_URL}?{params}", timeout=timeout))
         detected_src = "auto"
         if len(data) > 2 and isinstance(data[2], str) and data[2].strip():
             detected_src = data[2].strip()
@@ -249,22 +275,30 @@ def mymemory_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
         rd = data.get("responseData") or {}
         translated = (rd.get("translatedText") or "").strip()
         detected = (rd.get("detectedLanguage") or "").strip() or "auto"
+        if "MYMEMORY WARNING" in translated:
+            return None, None   # исчерпана дневная квота — это не перевод
         return (translated or None), detected
     except Exception:
         return None, None
 
 
 def translate_auto(text, dst="ru"):
-    """Цепочка бэкендов: Google gtx (с паузой при 429) → MyMemory."""
+    """Цепочка бэкендов: Google gtx (с выключателем при 429) → MyMemory."""
+    global GTX_BANNED_UNTIL, GTX_FAILS
+    if time.monotonic() < GTX_BANNED_UNTIL:
+        return mymemory_translate_ex(text, dst=dst)
     translated, detected = google_gtx_translate_ex(text, dst=dst)
     if translated is not None:
+        GTX_FAILS = 0
         return translated, detected
     if GTX_LAST_ERROR == "429":
-        log_debug("translate: gtx вернул 429, пауза 15 с и повтор")
-        time.sleep(15)
-        translated, detected = google_gtx_translate_ex(text, dst=dst)
-        if translated is not None:
-            return translated, detected
+        GTX_FAILS += 1
+        if GTX_FAILS >= GTX_BAN_THRESHOLD:
+            GTX_BANNED_UNTIL = time.monotonic() + GTX_BAN_SECONDS
+            GTX_FAILS = 0
+            log_debug(f"translate: gtx банит (429), перерыв {GTX_BAN_SECONDS // 60} мин, "
+                      f"перевод через MyMemory")
+        return mymemory_translate_ex(text, dst=dst)
     return mymemory_translate_ex(text, dst=dst)
 
 
@@ -857,20 +891,23 @@ def run_gui():
         try:
             supervise()
             # команды из трея (потокобезопасно: только tk-виджеты)
-            while True:
-                cmd = tray_cmds.get_nowait()
-                if cmd == "show":
-                    _show_window()
-                elif cmd == "quit":
-                    stop()
-                    collect_cfg()
-                    try:
-                        if tray_icon[0] is not None:
-                            tray_icon[0].stop()
-                    except Exception:
-                        pass
-                    root.destroy()
-                    return
+            try:
+                while True:
+                    cmd = tray_cmds.get_nowait()
+                    if cmd == "show":
+                        _show_window()
+                    elif cmd == "quit":
+                        stop()
+                        collect_cfg()
+                        try:
+                            if tray_icon[0] is not None:
+                                tray_icon[0].stop()
+                        except Exception:
+                            pass
+                        root.destroy()
+                        return
+            except queue.Empty:
+                pass
             while True:
                 item = state["done"].get_nowait()
                 if item[0] == "error":

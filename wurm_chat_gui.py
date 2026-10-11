@@ -581,6 +581,41 @@ class LogWatcher(threading.Thread):
 # Переводчик (фоновый поток)
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Жаргон торгового чата: префиксы переводим жёстко, остаток — через переводчик
+# --------------------------------------------------------------------------- #
+
+TRADE_PREFIXES = {"WTS": "Продам", "WTB": "Куплю", "PC": "Прайсчек",
+                  "WTT": "Обменяю"}
+# Реальный формат: «(Cad) WTS …» — серверный тег в скобках перед префиксом,
+# префикс может быть в любом регистре («wts», «Wtb»).
+RE_TRADE_PREFIX = re.compile(r"^(?:\(([A-Za-z]{2,10})\)\s*)?(WTS|WTB|WTT|PC)\b[:\s-]*",
+                             re.IGNORECASE)
+
+
+def translate_trade_body(body, dst="ru"):
+    """WTS/WTB/PC в начале — фиксированный перевод, остаток — обычная цепочка."""
+    m = RE_TRADE_PREFIX.match(body)
+    if not m:
+        return translate_preserving_names(body, dst=dst)
+    prefix = m.group(2).upper()
+    server = m.group(1)          # серверный тег «(Cad)», может отсутствовать
+    rest = body[m.end():]
+    head = TRADE_PREFIXES[prefix]
+    if server:
+        head = f"({server}) {head}"
+    if not rest.strip():
+        return f"{head} (en)"
+    if dst == "ru" and re.search(r"[А-Яа-яЁё]", rest):
+        tail, lang = rest, "ru"   # остаток уже на русском
+    else:
+        tail, detected = translate_auto(rest, dst=dst)
+        if tail is None:
+            return None
+        lang = detected if detected and detected != "auto" else "und"
+    return f"{head} {tail} ({lang})"
+
+
 class TranslateWorker(threading.Thread):
     """Берёт ("line", канал, строка), отдаёт ("done", канал, время, имя,
     оригинал, перевод|None). Переводит только тело сообщения, имя — нет."""
@@ -627,7 +662,9 @@ class TranslateWorker(threading.Thread):
 
         translated = None
         if self.enabled and body:
-            if self.target_lang == "ru" and re.search(r"[А-Яа-яЁё]", body):
+            trade_prefixed = channel == "Trade" and bool(RE_TRADE_PREFIX.match(body))
+            if (self.target_lang == "ru" and re.search(r"[А-Яа-яЁё]", body)
+                    and not trade_prefixed):
                 translated = body  # уже на русском — перевод не нужен
             elif body in self.cache:
                 translated = self.cache[body]
@@ -635,7 +672,10 @@ class TranslateWorker(threading.Thread):
                 pause = TRANSLATE_INTERVAL - (time.monotonic() - self._last_req)
                 if pause > 0:
                     time.sleep(pause)
-                translated = translate_preserving_names(body, self.target_lang)
+                if trade_prefixed:
+                    translated = translate_trade_body(body, self.target_lang)
+                else:
+                    translated = translate_preserving_names(body, self.target_lang)
                 self._last_req = time.monotonic()
                 if translated is not None:
                     self.cache[body] = translated
@@ -1126,6 +1166,34 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] translate: {exc}")
+    try:
+        got = translate_trade_body("WTS rare pickaxe, 5s")
+        good = got is not None and got.startswith("Продам")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade WTS: {got!r}")
+        got = translate_trade_body("wtb: bulk cotton")
+        good = got is not None and got.startswith("Куплю")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade WTB: {got!r}")
+        got = translate_trade_body("PC on a rare hammer")
+        good = got is not None and got.startswith("Прайсчек")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade PC: {got!r}")
+        got = translate_trade_body("(Cad) WTS wemp, cotton, barley")
+        good = got is not None and got.startswith("(Cad) Продам")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade серверный тег: {got!r}")
+        got = translate_trade_body("(Mel) wtb rare leather cap")
+        good = got is not None and "(Mel) Куплю" in got
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade тег+регистр: {got!r}")
+        got = translate_trade_body("(Xan) WTT rare sword for axe")
+        good = got is not None and "(Xan) Обменяю" in got
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade WTT: {got!r}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] trade-префиксы: {exc}")
     persona = steam_persona_name()
     auto = auto_logs_dir()
     good = os.path.isdir(auto)

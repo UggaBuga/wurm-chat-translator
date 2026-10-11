@@ -812,6 +812,77 @@ def run_gui():
     clear_btn = ttk.Button(bottom, text="Очистить всё", command=clear_all)
     clear_btn.pack(side="right")
 
+    # ---------------- поиск по истории ----------------
+    def do_search(event=None):
+        query = search_var.get().strip().lower()
+        if not query:
+            return
+        results = []
+        for ch_name, entries in history.items():
+            for (t, name, original, translated) in entries:
+                hay = " ".join(x for x in (name, original, translated) if x).lower()
+                if query in hay:
+                    results.append((ch_name, t, name, original, translated))
+        show_search_results(query, results)
+
+    def show_search_results(query, results):
+        win = tk.Toplevel(root)
+        win.title(f"Поиск: {query} — найдено: {len(results)}")
+        win.geometry("640x400")
+        txt = scrolledtext.ScrolledText(win, wrap="word", state="disabled",
+                                        font=("Segoe UI", 10))
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("time", foreground="#005a9e")
+        txt.tag_config("name", font=("Segoe UI", 10, "bold"))
+        txt.tag_config("ch", foreground="#0066ff")
+        txt.tag_config("orig", foreground="#777777")
+        lines = []   # индекс строки -> канал для двойного клика
+        txt.config(state="normal")
+        if not results:
+            txt.insert("end", "Ничего не найдено.\n")
+        for (ch_name, t, name, original, translated) in results:
+            txt.insert("end", f"[{ch_name}] ", "ch")
+            if t:
+                txt.insert("end", f"[{t}] ", "time")
+            if name:
+                txt.insert("end", f"{name}: ", "name")
+            txt.insert("end", (translated or original) + "\n")
+            if translated and translated != original and orig_var.get():
+                txt.insert("end", original + "\n", "orig")
+            txt.insert("end", "\n")
+            lines.append(ch_name)
+        txt.config(state="disabled")
+
+        def on_double(_e):
+            try:
+                idx = txt.index(f"@{_e.x},{_e.y}")
+                line_no = int(idx.split(".")[0])
+            except Exception:
+                return
+            # строки результата идут парами/тройками, ищем ближайший сверху канал
+            ch = None
+            for ln in range(line_no, 0, -1):
+                start = f"{ln}.0"
+                end = f"{ln}.end"
+                content = txt.get(start, end)
+                if content.startswith("["):
+                    m = re.match(r"\[([^\]]+)\]", content)
+                    if m and m.group(1) in tabs:
+                        ch = m.group(1)
+                        break
+            if ch:
+                switch_tab(ch)
+
+        txt.bind("<Double-Button-1>", on_double)
+        ttk.Label(win, text="Двойной клик по результату — перейти ко вкладке",
+                  foreground="#666666").pack(anchor="w", padx=6, pady=2)
+
+    search_var = tk.StringVar()
+    search_entry = ttk.Entry(bottom, textvariable=search_var, width=24)
+    search_entry.pack(side="left", padx=(12, 2))
+    search_entry.bind("<Return>", do_search)
+    ttk.Button(bottom, text="🔍 Найти", command=do_search).pack(side="left")
+
     # ---------------- логика ----------------
     def collect_cfg():
         cfg.update({

@@ -57,6 +57,74 @@ APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
 CONFIG_FILE = os.path.join(APP_DIR, "wurm_chat_gui_config.json")
 DEBUG_FILE = os.path.join(APP_DIR, "wurm_chat_gui_debug.log")
 
+# Один экземпляр приложения: именованный мьютекс + триггер-файл, по которому
+# уже запущенный экземпляр показывает своё окно (в т.ч. из трея).
+MUTEX_NAME = "Global\\WurmChatTranslator_SingleInstance_v1"
+ACTIVATE_TRIGGER = os.path.join(APP_DIR, ".wurm_chat_activate")
+
+
+def _single_instance_mutex():
+    """Создать мьютекс. Вернуть (handle, already_running)."""
+    import ctypes
+    # use_last_error=True — иначе GetLastError не срабатывает и повторный
+    # запуск не определяется.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    already = (ctypes.get_last_error() == 183)  # ERROR_ALREADY_EXISTS
+    return handle, already
+
+
+def _find_existing_hwnd():
+    """HWND видимого (или свёрнутого в трей) окна другого экземпляра."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def cb(h, l):
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(h, buf, 256)
+        if buf.value == APP_TITLE:
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+            if pid.value and pid.value != os.getpid():
+                found.append(h)
+        return True
+
+    user32.EnumWindows(cb, None)
+    return found[0] if found else None
+
+
+def _activate_existing():
+    """Попросить уже запущенный экземпляр показать окно: создать триггер-файл,
+    работающий цикл poll() его заметит и развернёт окно (в т.ч. из трея)."""
+    try:
+        with open(ACTIVATE_TRIGGER, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
+def _terminate_existing():
+    """Завершить другие экземпляры приложения (для «заменить»)."""
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    hwnd = _find_existing_hwnd()
+    if not hwnd:
+        return False
+    user32 = ctypes.windll.user32
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    SYNCHRONIZE = 0x00100000
+    PROCESS_TERMINATE = 0x0001
+    h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, False, pid.value)
+    if not h:
+        return False
+    kernel32.TerminateProcess(h, 0)
+    kernel32.WaitForSingleObject(h, 5000)
+    kernel32.CloseHandle(h)
+    return True
+
 
 def log_debug(msg):
     """Дописать строку в файл отладки — чтобы падения не исчезали бесследно."""
@@ -1045,6 +1113,14 @@ def run_gui():
     def poll():
         try:
             supervise()
+            # запрос «покажи окно» от второго запущенного экземпляра
+            try:
+                if os.path.isfile(ACTIVATE_TRIGGER):
+                    os.remove(ACTIVATE_TRIGGER)
+                    log_debug("получен запрос активации от второго экземпляра")
+                    _show_window()
+            except Exception:
+                pass
             # периодическое обновление индикатора переводчика, даже без сообщений
             now = time.monotonic()
             if state.get("running") and now - state.get("status_at", 0) > 5:
@@ -1212,6 +1288,35 @@ def main():
     if args.test:
         raise SystemExit(self_test())
     log_debug("=== запуск GUI ===")
+
+    # Один экземпляр: если приложение уже работает — спросить, что делать.
+    mutex_handle, already = _single_instance_mutex()
+    if already:
+        log_debug("обнаружен уже запущенный экземпляр")
+        import tkinter as tk
+        from tkinter import messagebox
+        ask = tk.Tk()
+        ask.withdraw()
+        ask.attributes("-topmost", True)
+        choice = messagebox.askyesnocancel(
+            APP_TITLE,
+            "Приложение уже запущено.\n\n"
+            "Да — активировать уже запущенное\n"
+            "Нет — закрыть его и запустить новое\n"
+            "Отмена — ничего не делать")
+        ask.destroy()
+        if choice is None:          # Отмена
+            log_debug("второй экземпляр: отмена пользователем")
+            return
+        if choice:                  # Да — активировать существующее
+            _activate_existing()
+            log_debug("второй экземпляр: запрошена активация первого")
+            return
+        # Нет — завершить старый экземпляр и запуститься самим
+        _terminate_existing()
+        log_debug("второй экземпляр: старый завершён, запускаюсь")
+        time.sleep(1)
+
     try:
         run_gui()
     except Exception:

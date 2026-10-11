@@ -209,24 +209,59 @@ GTX_FAILS = 0                # подряд идущих 429
 GTX_BAN_THRESHOLD = 3        # столько 429 подряд → бан
 GTX_BAN_SECONDS = 1800       # бан на 30 минут
 
+# Состояние переводчика для индикатора в статусной строке:
+# "gtx" | "mymemory" | "fallback" (gtx в бане, идёт через запасной) | None (нет данных)
+TRANSLATOR_STATE = {"backend": None}
+
+
+def translator_status_text():
+    """Человекочитаемый статус переводчика для статусной строки."""
+    st = TRANSLATOR_STATE.get("backend")
+    if st == "gtx":
+        return "перевод: Google ✓"
+    if st == "mymemory":
+        return "перевод: запасной сервис"
+    if st == "fallback":
+        return "перевод: Google в перерыве, запасной сервис"
+    return "перевод: нет данных"
+
+
+def _find_curl():
+    """Путь к curl.exe: вложенный в exe (curlbin) → системный. Вложенный берём
+    первым: системный curl Windows Google блокирует по TLS-отпечатку («Sorry…»),
+    а вложенный (из комплекта) проходит."""
+    base = getattr(sys, "_MEIPASS", None)   # папка распаковки onefile-exe
+    candidates = []
+    if base:
+        candidates.append(os.path.join(base, "curlbin", "curl.exe"))
+    candidates.append(os.path.join(APP_DIR, "curlbin", "curl.exe"))
+    candidates.append(r"C:\Windows\System32\curl.exe")
+    candidates.append("curl.exe")
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    return None
+
 
 def _http_get(url, timeout=GTX_TIMEOUT):
-    """GET-запрос с текстовым ответом. Через curl, если он есть (Google по TLS-
-    отпечатку банит urllib — 429, тогда как curl проходит), иначе через urllib."""
-    curl = None
-    if platform.system() == "Windows":
-        for cand in (r"C:\Windows\System32\curl.exe", "curl.exe"):
-            if os.path.isfile(cand):
-                curl = cand
-                break
+    """GET-запрос с текстовым ответом. Через curl (Google по TLS-отпечатку банит
+    прямые HTTPS-запросы urllib — «Sorry…»), при отсутствии curl — urllib."""
+    curl = _find_curl()
     if curl:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = dict(os.environ)
+        # curl подбирает DLL рядом с собой — убираем путаницу из PATH не нужно,
+        # Windows и так смотрит каталог exe в первую очередь.
         out = subprocess.run(
             [curl, "-sS", "--max-time", str(timeout), "-A",
              "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", url],
-            capture_output=True, creationflags=creationflags, timeout=timeout + 5)
+            capture_output=True, creationflags=creationflags,
+            timeout=timeout + 5, env=env)
         if out.returncode == 0 and out.stdout:
-            return out.stdout.decode("utf-8", "replace")
+            text = out.stdout.decode("utf-8", "replace")
+            if not text.lstrip().startswith("<"):
+                return text
+            raise RuntimeError("curl: получена HTML-заглушка (блокировка)")
         raise RuntimeError(f"curl exit={out.returncode}: {out.stderr[:120]!r}")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -282,14 +317,23 @@ def mymemory_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
         return None, None
 
 
+def _mymemory_with_state(text, dst="ru", fallback=False):
+    """MyMemory + обновление индикатора состояния переводчика."""
+    translated, detected = mymemory_translate_ex(text, dst=dst)
+    if translated is not None:
+        TRANSLATOR_STATE["backend"] = "fallback" if fallback else "mymemory"
+    return translated, detected
+
+
 def translate_auto(text, dst="ru"):
     """Цепочка бэкендов: Google gtx (с выключателем при 429) → MyMemory."""
     global GTX_BANNED_UNTIL, GTX_FAILS
     if time.monotonic() < GTX_BANNED_UNTIL:
-        return mymemory_translate_ex(text, dst=dst)
+        return _mymemory_with_state(text, dst=dst, fallback=True)
     translated, detected = google_gtx_translate_ex(text, dst=dst)
     if translated is not None:
         GTX_FAILS = 0
+        TRANSLATOR_STATE["backend"] = "gtx"
         return translated, detected
     if GTX_LAST_ERROR == "429":
         GTX_FAILS += 1
@@ -298,8 +342,8 @@ def translate_auto(text, dst="ru"):
             GTX_FAILS = 0
             log_debug(f"translate: gtx банит (429), перерыв {GTX_BAN_SECONDS // 60} мин, "
                       f"перевод через MyMemory")
-        return mymemory_translate_ex(text, dst=dst)
-    return mymemory_translate_ex(text, dst=dst)
+        return _mymemory_with_state(text, dst=dst, fallback=True)
+    return _mymemory_with_state(text, dst=dst)
 
 
 def translate_preserving_names(text, dst="ru"):
@@ -890,6 +934,12 @@ def run_gui():
     def poll():
         try:
             supervise()
+            # периодическое обновление индикатора переводчика, даже без сообщений
+            now = time.monotonic()
+            if state.get("running") and now - state.get("status_at", 0) > 5:
+                state["status_at"] = now
+                status_var.set(f"Работает. Поймано сообщений: {state.get('count', 0)}. "
+                               f"{translator_status_text()}")
             # команды из трея (потокобезопасно: только tk-виджеты)
             try:
                 while True:
@@ -918,7 +968,8 @@ def run_gui():
                 _, channel, t, name, body, translated = item
                 append_to(channel, t, name, body, translated)
                 state["count"] = state.get("count", 0) + 1
-                status_var.set(f"Работает. Поймано сообщений: {state['count']}")
+                status_var.set(f"Работает. Поймано сообщений: {state['count']}. "
+                               f"{translator_status_text()}")
                 if snd_var.get():
                     play_sound(cfg.get("sound_file") or None)
                 if ntf_var.get():

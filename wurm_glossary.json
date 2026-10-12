@@ -156,11 +156,19 @@
     "fix": [
       "Gimmersteel",
       "Glimmersteel"
+    ],
+    "fix_en": [
+      "glimerstal",
+      "glimmer steel",
+      "glimmerstal"
     ]
   },
   {
     "en": "seryll",
-    "ru": "серилл"
+    "ru": "серилл",
+    "fix_en": [
+      "serill"
+    ]
   },
   {
     "en": "adamantine",
@@ -176,6 +184,10 @@
     "fix": [
       "сырьё",
       "сырье"
+    ],
+    "fix_en": [
+      "vemp",
+      "hemp"
     ]
   },
   {

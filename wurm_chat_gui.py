@@ -717,11 +717,14 @@ def translate_trade_body(body, dst="ru"):
 # с exe создаётся при первом запуске и его можно править.
 #
 # Формат записи:
-#   "en"  — английский игровой термин: если он остался в переводе нетронутым,
-#           заменяется на "ru" (по границам слова, без учёта регистра)
-#   "ru"  — правильный русский вариант термина
-#   "fix" — список типичных кривых переводов, которые тоже заменяются на "ru"
-#           (по границам слова; строка вида "/.../" — регулярное выражение)
+#   "en"    — английский игровой термин: если он остался в переводе нетронутым,
+#             заменяется на "ru" (по границам слова, без учёта регистра)
+#   "ru"    — правильный русский вариант термина
+#   "fix"   — список типичных кривых переводов, которые тоже заменяются на "ru"
+#             (по границам слова; строка вида "/.../" — регулярное выражение)
+#   "fix_en"— то же для обратного направления RU->EN: машинный перевод может
+#             транслитерировать термин искажённо («вемп» -> «vemp», «глимерсталь»
+#             -> «glimerstal») — такие варианты заменяются на правильный "en"
 
 GLOSSARY_FILE = os.path.join(APP_DIR, "wurm_glossary.json")
 
@@ -761,12 +764,14 @@ DEFAULT_GLOSSARY = [
     {"en": "willowwood", "ru": "ива"},
     # --- Металлы ---
     {"en": "glimmersteel", "ru": "глимерсталь",
-     "fix": ["Gimmersteel", "Glimmersteel"]},
-    {"en": "seryll", "ru": "серилл"},
+     "fix": ["Gimmersteel", "Glimmersteel"],
+     "fix_en": ["glimerstal", "glimmer steel", "glimmerstal"]},
+    {"en": "seryll", "ru": "серилл", "fix_en": ["serill"]},
     {"en": "adamantine", "ru": "адамантин"},
     {"en": "electrum", "ru": "электрум"},
     # --- Ресурсы и урожай ---
-    {"en": "wemp", "ru": "вемп", "fix": ["сырьё", "сырье"]},
+    {"en": "wemp", "ru": "вемп", "fix": ["сырьё", "сырье"],
+     "fix_en": ["vemp", "hemp"]},
     {"en": "cotton", "ru": "хлопок"},
     {"en": "barley", "ru": "ячмень"},
     {"en": "wheat", "ru": "пшеница"},
@@ -790,8 +795,25 @@ DEFAULT_GLOSSARY = [
 ]
 
 
+def _compile_fixes(variants):
+    """Строки вариантов -> скомпилированные регэкспы (граница слева, для
+    склонений; строка вида "/.../" — регулярное выражение целиком)."""
+    res = []
+    for f in variants or []:
+        f = str(f)
+        try:
+            if len(f) > 2 and f.startswith("/") and f.endswith("/"):
+                res.append(re.compile(f[1:-1], re.IGNORECASE))
+            else:
+                res.append(re.compile(r"(?<![\w])" + re.escape(f),
+                                      re.IGNORECASE))
+        except re.error:
+            continue              # битая запись не должна ронять словарь
+    return res
+
+
 def _compile_glossary(items):
-    """Список записей -> (en, скомп. en-регэксп, ru, fix-регэкспы, ru-регэксп)."""
+    """Список записей -> (en, en_re, ru, fix_res, ru_re, fix_en_res)."""
     entries = []
     for item in items:
         if not isinstance(item, dict):
@@ -804,21 +826,9 @@ def _compile_glossary(items):
                            re.IGNORECASE)
         ru_re = re.compile(r"(?<![\w])" + re.escape(ru) + r"(?![\w])",
                            re.IGNORECASE)
-        fix_res = []
-        for f in item.get("fix", []) or []:
-            f = str(f)
-            try:
-                if len(f) > 2 and f.startswith("/") and f.endswith("/"):
-                    fix_res.append(re.compile(f[1:-1], re.IGNORECASE))
-                else:
-                    # Граница только слева: ловим склонения («дело» -> «делом»,
-                    # «документ» -> «документа»). Хвост не ограничиваем.
-                    fix_res.append(
-                        re.compile(r"(?<![\w])" + re.escape(f),
-                                   re.IGNORECASE))
-            except re.error:
-                continue          # битая запись не должна ронять словарь
-        entries.append((en, en_re, ru, fix_res, ru_re))
+        fix_res = _compile_fixes(item.get("fix"))
+        fix_en_res = _compile_fixes(item.get("fix_en"))
+        entries.append((en, en_re, ru, fix_res, ru_re, fix_en_res))
     return entries
 
 
@@ -860,12 +870,16 @@ def glossary_fix(text, dst="ru"):
     if not text:
         return text
     if dst == "ru":
-        for _en, en_re, ru, fix_res, _ru_re in glossary_entries():
+        for _en, en_re, ru, fix_res, _ru_re, _fxe in glossary_entries():
             for fr in fix_res:
                 text = fr.sub(ru, text)
             text = en_re.sub(ru, text)
     elif dst == "en":
-        for en, _en_re, ru, _fix_res, ru_re in glossary_entries():
+        for en, _en_re, ru, _fix_res, ru_re, fix_en_res in glossary_entries():
+            # сначала кривые транслитерации («glimerstal» -> «glimmersteel»),
+            # потом точный ru-термин, если он остался нетронутым
+            for fr in fix_en_res:
+                text = fr.sub(en, text)
             text = ru_re.sub(en, text)
     return text
 
@@ -1782,8 +1796,12 @@ def self_test():
             good = want in got
             ok &= good
             print(f"  [{'OK ' if good else 'FAIL'}] словарь ru: {src!r} -> {got!r}")
+        got = glossary_fix("I will buy glimerstal and vemp for favor", "en")
+        good = all(x in got.lower() for x in ("glimmersteel", "wemp"))
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь en (кривые транслитерации): {got!r}")
         got = glossary_fix("продам кедр и вемп за фавор", "en")
-        good = all(x in got.lower() for x in ("cedarwood", "wemp"))
+        good = all(x in got for x in ("cedarwood", "wemp", "favour"))
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] словарь en: {got!r}")
     except Exception as exc:

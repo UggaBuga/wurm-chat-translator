@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.4.0"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -708,6 +708,374 @@ def translate_trade_body(body, dst="ru"):
     return f"{head} {tail} ({lang})"
 
 
+# --------------------------------------------------------------------------- #
+# Игровой словарь: пост-обработка машинного перевода
+# --------------------------------------------------------------------------- #
+# Машинный перевод коверкает игровые термины Wurm («deed» -> «документ»,
+# «wemp» -> «сырьё», «glimmersteel» -> «Gimmersteel», «90ql» -> «90кл»).
+# Словарь исправляет перевод после машинного: файл wurm_glossary.json рядом
+# с exe создаётся при первом запуске и его можно править.
+#
+# Формат записи:
+#   "en"  — английский игровой термин: если он остался в переводе нетронутым,
+#           заменяется на "ru" (по границам слова, без учёта регистра)
+#   "ru"  — правильный русский вариант термина
+#   "fix" — список типичных кривых переводов, которые тоже заменяются на "ru"
+#           (по границам слова; строка вида "/.../" — регулярное выражение)
+
+GLOSSARY_FILE = os.path.join(APP_DIR, "wurm_glossary.json")
+
+DEFAULT_GLOSSARY = [
+    # --- Поселения и мир ---
+    {"en": "deed", "ru": "поселение", "fix": ["документ", "дело"]},
+    {"en": "guard tower", "ru": "башня стражи", "fix": ["сторожевая вышка"]},
+    {"en": "spirit templar", "ru": "храмовник", "fix": ["тамплиер"]},
+    {"en": "guard", "ru": "страж", "fix": ["охранник"]},
+    {"en": "token", "ru": "токен", "fix": ["жетон"]},
+    {"en": "mailbox", "ru": "почтовый ящик"},
+    {"en": "trader", "ru": "торговец"},
+    {"en": "merchant", "ru": "торговец"},
+    # --- Качество и редкость ---
+    {"en": "ql", "ru": "ql", "fix": [r"/(?<=\d)\s*кл(?![\w])/"]},
+    {"en": "rare", "ru": "редкий"},
+    {"en": "supreme", "ru": "превосходный", "fix": ["высший"]},
+    {"en": "fantastic", "ru": "фантастический"},
+    {"en": "improve", "ru": "прокачать"},
+    {"en": "grind", "ru": "гринд"},
+    # --- Дерево ---
+    {"en": "applewood", "ru": "яблоня", "fix": ["яблочное дерево"]},
+    {"en": "birchwood", "ru": "берёза"},
+    {"en": "cedarwood", "ru": "кедр", "fix": ["кедровое дерево"]},
+    {"en": "chestnutwood", "ru": "каштан"},
+    {"en": "firwood", "ru": "пихта"},
+    {"en": "hazelwood", "ru": "орешник"},
+    {"en": "lemonwood", "ru": "лимонное дерево"},
+    {"en": "lindenwood", "ru": "липа"},
+    {"en": "maplewood", "ru": "клён"},
+    {"en": "oakwood", "ru": "дуб"},
+    {"en": "olivewood", "ru": "олива", "fix": ["оливковое дерево"]},
+    {"en": "pinewood", "ru": "сосна"},
+    {"en": "raspberrywood", "ru": "малина"},
+    {"en": "rosewood", "ru": "розовое дерево"},
+    {"en": "walnutwood", "ru": "грецкий орех"},
+    {"en": "willowwood", "ru": "ива"},
+    # --- Металлы ---
+    {"en": "glimmersteel", "ru": "глимерсталь",
+     "fix": ["Gimmersteel", "Glimmersteel"]},
+    {"en": "seryll", "ru": "серилл"},
+    {"en": "adamantine", "ru": "адамантин"},
+    {"en": "electrum", "ru": "электрум"},
+    # --- Ресурсы и урожай ---
+    {"en": "wemp", "ru": "вемп", "fix": ["сырьё", "сырье"]},
+    {"en": "cotton", "ru": "хлопок"},
+    {"en": "barley", "ru": "ячмень"},
+    {"en": "wheat", "ru": "пшеница"},
+    # --- Вера и магия ---
+    {"en": "favour", "ru": "фавор", "fix": ["благосклонность"]},
+    {"en": "favor", "ru": "фавор"},
+    {"en": "sermon", "ru": "проповедь"},
+    {"en": "cast", "ru": "каст"},
+    {"en": "courier", "ru": "курьер"},
+    {"en": "rune", "ru": "руна"},
+    {"en": "imbue", "ru": "имбу"},
+    # --- Существа ---
+    {"en": "hell hound", "ru": "адская гончая"},
+    {"en": "lava spider", "ru": "лавовый паук"},
+    {"en": "anaconda", "ru": "анаконда"},
+    # --- Торговые префиксы в любом месте сообщения ---
+    {"en": "wts", "ru": "Продам"},
+    {"en": "wtb", "ru": "Куплю"},
+    {"en": "wtt", "ru": "Обменяю"},
+    {"en": "pc", "ru": "Прайсчек"},
+]
+
+
+def _compile_glossary(items):
+    """Список записей -> (en, скомп. en-регэксп, ru, fix-регэкспы, ru-регэксп)."""
+    entries = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        en = str(item.get("en", "")).strip()
+        ru = str(item.get("ru", "")).strip()
+        if not en or not ru:
+            continue
+        en_re = re.compile(r"(?<![\w])" + re.escape(en) + r"(?![\w])",
+                           re.IGNORECASE)
+        ru_re = re.compile(r"(?<![\w])" + re.escape(ru) + r"(?![\w])",
+                           re.IGNORECASE)
+        fix_res = []
+        for f in item.get("fix", []) or []:
+            f = str(f)
+            try:
+                if len(f) > 2 and f.startswith("/") and f.endswith("/"):
+                    fix_res.append(re.compile(f[1:-1], re.IGNORECASE))
+                else:
+                    # Граница только слева: ловим склонения («дело» -> «делом»,
+                    # «документ» -> «документа»). Хвост не ограничиваем.
+                    fix_res.append(
+                        re.compile(r"(?<![\w])" + re.escape(f),
+                                   re.IGNORECASE))
+            except re.error:
+                continue          # битая запись не должна ронять словарь
+        entries.append((en, en_re, ru, fix_res, ru_re))
+    return entries
+
+
+_glossary_cache = {"mtime": None, "entries": None}
+
+
+def glossary_entries():
+    """Скомпилированный словарь; файл перечитывается при изменении на диске —
+    правки вступают в силу без перезапуска программы."""
+    try:
+        mtime = os.path.getmtime(GLOSSARY_FILE)
+    except OSError:
+        mtime = None
+    if _glossary_cache["entries"] is not None and mtime == _glossary_cache["mtime"]:
+        return _glossary_cache["entries"]
+    items = DEFAULT_GLOSSARY
+    try:
+        if not os.path.exists(GLOSSARY_FILE):
+            with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_GLOSSARY, f, ensure_ascii=False, indent=2)
+        else:
+            with open(GLOSSARY_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                items = loaded
+    except Exception as exc:      # битый файл — работаем на встроенном словаре
+        log_debug(f"словарь: не удалось прочитать {GLOSSARY_FILE}: {exc!r}")
+    _glossary_cache.update(mtime=mtime, entries=_compile_glossary(items))
+    return _glossary_cache["entries"]
+
+
+def glossary_fix(text, dst="ru"):
+    """Пост-обработка перевода игровым словарём.
+
+    dst="ru": кривые переводы и нетронутые английские термины -> ru-термин.
+    dst="en" (панель ответа): известные ru-термины -> en, чтобы ответ вышел
+    с игровой лексикой, а не дословным переводом.
+    """
+    if not text:
+        return text
+    if dst == "ru":
+        for _en, en_re, ru, fix_res, _ru_re in glossary_entries():
+            for fr in fix_res:
+                text = fr.sub(ru, text)
+            text = en_re.sub(ru, text)
+    elif dst == "en":
+        for en, _en_re, ru, _fix_res, ru_re in glossary_entries():
+            text = ru_re.sub(en, text)
+    return text
+
+
+def glossary_raw_items():
+    """Сырой список записей словаря (dict'ы) из файла или встроенный."""
+    try:
+        if os.path.exists(GLOSSARY_FILE):
+            with open(GLOSSARY_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                return [x for x in loaded if isinstance(x, dict)]
+    except Exception as exc:
+        log_debug(f"словарь: ошибка чтения для редактора: {exc!r}")
+    return [dict(x) for x in DEFAULT_GLOSSARY]
+
+
+def glossary_save_items(items):
+    """Сохранить записи в файл и сбросить кэш — изменения действуют сразу."""
+    with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+    _glossary_cache.update(mtime=None, entries=None)
+
+
+def open_glossary_editor(parent):
+    """Ненавязчивый редактор словаря: правка прямо в ячейке двойным щелчком,
+    каждое изменение сразу пишется в wurm_glossary.json и действует без
+    перезапуска. Открывается по клику на ссылке «Словарь» в углу окна."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    win = tk.Toplevel(parent)
+    win.title(f"Словарь терминов — {APP_TITLE}")
+    win.geometry("640x440")
+    win.minsize(520, 320)
+    win.transient(parent)
+
+    items = glossary_raw_items()
+
+    # ---------- таблица ----------
+    table_frame = ttk.Frame(win)
+    table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+    cols = ("en", "ru", "fix")
+    table = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
+    table.heading("en", text="Англ. термин")
+    table.heading("ru", text="Перевод")
+    table.heading("fix", text="Кривые варианты (через запятую)")
+    table.column("en", width=150, anchor="w")
+    table.column("ru", width=150, anchor="w")
+    table.column("fix", width=260, anchor="w")
+    scroll = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
+    table.configure(yscrollcommand=scroll.set)
+    table.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    status_var = tk.StringVar()
+
+    def fix_to_text(fix):
+        return ", ".join(str(x) for x in (fix or []))
+
+    def refresh():
+        table.delete(*table.get_children())
+        for i, it in enumerate(items):
+            table.insert("", "end", iid=str(i), values=(
+                it.get("en", ""), it.get("ru", ""), fix_to_text(it.get("fix"))))
+
+    def autosave():
+        try:
+            glossary_save_items(items)
+            status_var.set(f"Записей: {len(items)} — каждое изменение "
+                           f"сохраняется сразу и действует без перезапуска")
+        except Exception as exc:
+            status_var.set(f"Ошибка сохранения: {exc}")
+            log_debug(f"словарь: ошибка сохранения: {exc!r}")
+
+    # ---------- правка прямо в ячейке ----------
+    edit_state = {"widget": None, "iid": None, "col": None}
+
+    def commit_edit(_e=None):
+        """Завершить правку ячейки: записать значение и сохранить."""
+        wdg = edit_state["widget"]
+        if wdg is None:
+            return
+        value = wdg.get().strip()
+        iid, col = edit_state["iid"], edit_state["col"]
+        edit_state["widget"] = None
+        wdg.destroy()
+        if iid is None:
+            return
+        i = int(iid)
+        if i >= len(items):
+            return
+        it = items[i]
+        if col == "fix":
+            fix = [x.strip() for x in value.split(",") if x.strip()]
+            if fix:
+                it["fix"] = fix
+            else:
+                it.pop("fix", None)
+        else:
+            it[col] = value
+        # пустая запись (без термина и перевода) — удаляем
+        if not it.get("en") and not it.get("ru"):
+            items.pop(i)
+            refresh()
+        else:
+            table.item(iid, values=(it.get("en", ""), it.get("ru", ""),
+                                    fix_to_text(it.get("fix"))))
+        autosave()
+
+    def cancel_edit(_e=None):
+        wdg = edit_state["widget"]
+        edit_state["widget"] = None
+        edit_state["iid"] = None
+        if wdg is not None:
+            wdg.destroy()
+
+    def start_edit(event):
+        if edit_state["widget"] is not None:
+            commit_edit()
+        iid = table.identify_row(event.y)
+        col_id = table.identify_column(event.x)   # '#1', '#2', '#3'
+        if not iid or not col_id:
+            return
+        col = cols[int(col_id[1:]) - 1]
+        bbox = table.bbox(iid, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        i = int(iid)
+        old = items[i].get("en", "") if col == "en" \
+            else items[i].get("ru", "") if col == "ru" \
+            else fix_to_text(items[i].get("fix"))
+        entry = ttk.Entry(table_frame)
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.insert(0, old)
+        entry.select_range(0, "end")
+        entry.focus_set()
+        edit_state.update(widget=entry, iid=iid, col=col)
+        entry.bind("<Return>", commit_edit)
+        entry.bind("<FocusOut>", commit_edit)
+        entry.bind("<Escape>", cancel_edit)
+
+    table.bind("<Double-Button-1>", start_edit)
+
+    # ---------- кнопки ----------
+    btns = ttk.Frame(win)
+    btns.pack(fill="x", padx=8, pady=2)
+
+    def add_row():
+        if edit_state["widget"] is not None:
+            commit_edit()
+        items.append({"en": "", "ru": ""})
+        refresh()
+        iid = str(len(items) - 1)
+        table.see(iid)
+        table.selection_set(iid)
+        # сразу начинаем править термин
+        bbox = table.bbox(iid, "en")
+        if bbox:
+            x, y, w, h = bbox
+            entry = ttk.Entry(table_frame)
+            entry.place(x=x, y=y, width=w, height=h)
+            entry.focus_set()
+            edit_state.update(widget=entry, iid=iid, col="en")
+            entry.bind("<Return>", commit_edit)
+            entry.bind("<FocusOut>", commit_edit)
+            entry.bind("<Escape>", cancel_edit)
+
+    def delete_selected():
+        if edit_state["widget"] is not None:
+            cancel_edit()
+        sel = table.selection()
+        if not sel:
+            return
+        for s in sorted((int(x) for x in sel), reverse=True):
+            items.pop(s)
+        refresh()
+        autosave()
+
+    ttk.Button(btns, text="➕ Добавить", command=add_row).pack(side="left")
+    ttk.Button(btns, text="Удалить выбранное", command=delete_selected).pack(
+        side="left", padx=4)
+    ttk.Button(btns, text="Открыть файл…",
+               command=lambda: os.startfile(GLOSSARY_FILE)).pack(side="left", padx=8)
+
+    # ---------- низ: проверка фразы ----------
+    test = ttk.LabelFrame(win, text="Проверить фразу (как после перевода)")
+    test.pack(fill="x", padx=8, pady=(4, 4))
+    test_var = tk.StringVar()
+    test_entry = ttk.Entry(test, textvariable=test_var)
+    test_entry.pack(side="left", fill="x", expand=True, padx=(6, 4), pady=4)
+    test_out = tk.StringVar(value="—")
+    ttk.Label(test, textvariable=test_out, foreground="#005a9e",
+              wraplength=280).pack(side="left", padx=(0, 6))
+
+    def on_test(*_a):
+        text = test_var.get()
+        test_out.set(glossary_fix(text, "ru") if text else "—")
+
+    test_var.trace_add("write", on_test)
+
+    ttk.Label(win, textvariable=status_var, foreground="#666666").pack(
+        anchor="w", padx=10, pady=(0, 6))
+
+    refresh()
+    autosave()   # статус про автосохранение + гарантия, что файл на месте
+    test_entry.focus_set()
+
+
 class TranslateWorker(threading.Thread):
     """Берёт ("line", канал, строка), отдаёт ("done", канал, время, имя,
     оригинал, перевод|None). Переводит только тело сообщения, имя — нет."""
@@ -770,6 +1138,9 @@ class TranslateWorker(threading.Thread):
                     translated = translate_preserving_names(body, self.target_lang)
                 self._last_req = time.monotonic()
                 if translated is not None:
+                    # Пост-обработка словарём до кэша: кэш хранит финальный вид.
+                    if self.target_lang == "ru":
+                        translated = glossary_fix(translated, "ru")
                     self.cache[body] = translated
                     if len(self.cache) > TRANSLATE_CACHE_MAX:
                         self.cache.pop(next(iter(self.cache)))
@@ -946,6 +1317,9 @@ def run_gui():
         seq = reply_state["seq"]
         try:
             result, _lang = translate_auto(text, dst="en")
+            if result:
+                # игровые термины — принятыми английскими словами, а не дословно
+                result = glossary_fix(result, dst="en")
         except Exception:
             result = None
         root.after(0, lambda: reply_show_result(text, result, seq))
@@ -985,9 +1359,13 @@ def run_gui():
     bottom.pack(fill="x", padx=8, pady=(2, 8))
     status_var = tk.StringVar(value="Остановлено")
     ttk.Label(bottom, textvariable=status_var).pack(side="left")
-    # номер версии — тихий уголок справа
+    # номер версии — тихий уголок справа; рядом неприметная ссылка на словарь
     ttk.Label(bottom, text=f"v{APP_VERSION}",
               foreground="#999999").pack(side="right", padx=(4, 0))
+    glossary_link = tk.Label(bottom, text="Словарь", fg="#7a9cc4",
+                             cursor="hand2", font=("Segoe UI", 8))
+    glossary_link.pack(side="right", padx=(4, 4))
+    glossary_link.bind("<Button-1>", lambda _e: open_glossary_editor(root))
     run_btn = ttk.Button(bottom, text="▶ Старт")
     run_btn.pack(side="right", padx=4)
     def clear_all():
@@ -1383,6 +1761,34 @@ def self_test():
     ok &= good
     print(f"  [{'OK ' if good else 'FAIL'}] steam-пользователь: {persona!r}; "
           f"логи: {auto}")
+    try:
+        entries = glossary_entries()
+        created = os.path.isfile(GLOSSARY_FILE)
+        good = created and len(entries) == len(DEFAULT_GLOSSARY)
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь: {len(entries)} записей, "
+              f"файл: {GLOSSARY_FILE}")
+        cases = [
+            ("Продается документ, содержание 20 шиллингов", "поселение"),
+            ("анаконда рядом с делом, будь осторожен", "поселением"),
+            ("сырьё и хлопок оптом", "вемп"),
+            ("кирку из кедра 90кл", "ql"),
+            ("Gimmersteel кусок 95ql", "глимерсталь"),
+            ("Дух-тамплиер позаботился о тролле", "храмовник"),
+            ("нужна благосклонность за каст", "фавор"),
+        ]
+        for src, want in cases:
+            got = glossary_fix(src, "ru")
+            good = want in got
+            ok &= good
+            print(f"  [{'OK ' if good else 'FAIL'}] словарь ru: {src!r} -> {got!r}")
+        got = glossary_fix("продам кедр и вемп за фавор", "en")
+        good = all(x in got.lower() for x in ("cedarwood", "wemp"))
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь en: {got!r}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] словарь: {exc}")
     print("Итог:", "все проверки пройдены" if ok else "есть ошибки")
     return 0 if ok else 1
 

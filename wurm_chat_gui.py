@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.0.5"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -913,8 +913,8 @@ def open_glossary_editor(parent):
 
     win = tk.Toplevel(parent)
     win.title(f"Словарь терминов — {APP_TITLE}")
-    win.geometry("640x440")
-    win.minsize(520, 320)
+    win.geometry("820x440")
+    win.minsize(640, 320)
     win.transient(parent)
 
     items = glossary_raw_items()
@@ -922,14 +922,16 @@ def open_glossary_editor(parent):
     # ---------- таблица ----------
     table_frame = ttk.Frame(win)
     table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-    cols = ("en", "ru", "fix")
+    cols = ("en", "ru", "fix", "fix_en")
     table = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
     table.heading("en", text="Англ. термин")
     table.heading("ru", text="Перевод")
-    table.heading("fix", text="Кривые варианты (через запятую)")
-    table.column("en", width=150, anchor="w")
-    table.column("ru", width=150, anchor="w")
-    table.column("fix", width=260, anchor="w")
+    table.heading("fix", text="Кривые варианты RU")
+    table.heading("fix_en", text="Кривые варианты EN")
+    table.column("en", width=130, anchor="w")
+    table.column("ru", width=130, anchor="w")
+    table.column("fix", width=200, anchor="w")
+    table.column("fix_en", width=200, anchor="w")
     scroll = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
     table.configure(yscrollcommand=scroll.set)
     table.pack(side="left", fill="both", expand=True)
@@ -944,7 +946,8 @@ def open_glossary_editor(parent):
         table.delete(*table.get_children())
         for i, it in enumerate(items):
             table.insert("", "end", iid=str(i), values=(
-                it.get("en", ""), it.get("ru", ""), fix_to_text(it.get("fix"))))
+                it.get("en", ""), it.get("ru", ""),
+                fix_to_text(it.get("fix")), fix_to_text(it.get("fix_en"))))
 
     def autosave():
         try:
@@ -973,12 +976,12 @@ def open_glossary_editor(parent):
         if i >= len(items):
             return
         it = items[i]
-        if col == "fix":
+        if col in ("fix", "fix_en"):
             fix = [x.strip() for x in value.split(",") if x.strip()]
             if fix:
-                it["fix"] = fix
+                it[col] = fix
             else:
-                it.pop("fix", None)
+                it.pop(col, None)
         else:
             it[col] = value
         # пустая запись (без термина и перевода) — удаляем
@@ -987,7 +990,8 @@ def open_glossary_editor(parent):
             refresh()
         else:
             table.item(iid, values=(it.get("en", ""), it.get("ru", ""),
-                                    fix_to_text(it.get("fix"))))
+                                    fix_to_text(it.get("fix")),
+                                    fix_to_text(it.get("fix_en"))))
         autosave()
 
     def cancel_edit(_e=None):
@@ -1010,9 +1014,10 @@ def open_glossary_editor(parent):
             return
         x, y, w, h = bbox
         i = int(iid)
-        old = items[i].get("en", "") if col == "en" \
-            else items[i].get("ru", "") if col == "ru" \
-            else fix_to_text(items[i].get("fix"))
+        if col in ("fix", "fix_en"):
+            old = fix_to_text(items[i].get(col))
+        else:
+            old = items[i].get(col, "")
         entry = ttk.Entry(table_frame)
         entry.place(x=x, y=y, width=w, height=h)
         entry.insert(0, old)

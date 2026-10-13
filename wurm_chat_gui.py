@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.4.0.5"
+APP_VERSION = "1.5.0"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -166,7 +166,10 @@ def check_latest_release(timeout=8):
         log_debug(f"проверка обновлений: не удалось: {exc!r}")
         return None
 
-# Корень установки Wurm Online (Steam). Подпапка игрока подставляется автоматически.
+# Корни установки Wurm Online: Steam-версия и автономный клиент с сайта
+# (у него данные лежат в домашней папке пользователя). Подпапка игрока
+# подставляется автоматически. Используется только по явному запросу
+# (кнопка «Найти») — сохранённый пользователем путь никогда не подменяется.
 WURM_PLAYERS_ROOTS = [
     r"e:\SteamLibrary\steamapps\common\Wurm Online\gamedata\players",
     os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
@@ -175,9 +178,13 @@ WURM_PLAYERS_ROOTS = [
                  r"Steam\steamapps\common\Wurm Online\gamedata\players"),
     r"D:\SteamLibrary\steamapps\common\Wurm Online\gamedata\players",
     r"C:\SteamLibrary\steamapps\common\Wurm Online\gamedata\players",
+    # Автономный клиент (установщик с wurmonline.com): данные в профиле
+    os.path.join(os.path.expanduser("~"), "wurm", "players"),
+    os.path.join(os.path.expanduser("~"), "Wurm", "players"),
+    os.path.join(os.path.expanduser("~"), "Wurm Online", "players"),
+    r"C:\Program Files (x86)\Wurm Online\wurm\players",
+    r"C:\Program Files\Wurm Online\wurm\players",
 ]
-# Путь по умолчанию, если автоподстановка не сработала (как в wurm_log_watcher_ru.py)
-DEFAULT_LOG_DIR = r"e:\SteamLibrary\steamapps\common\Wurm Online\gamedata\players\Uggabuga\logs"
 
 
 def steam_persona_name():
@@ -217,48 +224,87 @@ def steam_persona_name():
 
 
 def auto_logs_dir():
-    """Путь к логам: ...\\players\\<текущий игрок Steam>\\logs.
+    """Путь к логам: ...\\players\\<игрок>\\logs — Steam и автономный клиент.
 
     1) подпапка, совпадающая с PersonaName Steam (без учёта регистра);
     2) иначе персонаж с самой свежей активностью в логах (кто реально играл
        последним — по дате последнего записанного файла в его logs);
-    3) иначе единственная подпапка; в крайнем случае — DEFAULT_LOG_DIR.
+    3) иначе единственная подпапка.
+    Ничего не нашлось — пустая строка (пользователь укажет путь вручную).
+    Вызывается только по явному запросу (кнопка «Найти»), никогда сама.
     """
-    players_root = next((r for r in WURM_PLAYERS_ROOTS if os.path.isdir(r)), None)
-    if not players_root:
-        return DEFAULT_LOG_DIR
-    subs = [os.path.join(players_root, d)
-            for d in os.listdir(players_root)
-            if os.path.isdir(os.path.join(players_root, d))]
-    if not subs:
-        return DEFAULT_LOG_DIR
+    for players_root in WURM_PLAYERS_ROOTS:   # все корни, не только первый —
+        if not os.path.isdir(players_root):   # Steam может отсутствовать,
+            continue                            # а автономный клиент — присутствовать
+        subs = [os.path.join(players_root, d)
+                for d in os.listdir(players_root)
+                if os.path.isdir(os.path.join(players_root, d))]
+        if not subs:
+            continue
 
-    def logs_of(d):
-        logs = os.path.join(d, "logs")
-        return logs if os.path.isdir(logs) else None
+        def logs_of(d):
+            logs = os.path.join(d, "logs")
+            return logs if os.path.isdir(logs) else None
 
-    persona = steam_persona_name()
-    if persona:
-        persona_lower = persona.lower()
-        for d in subs:
-            if os.path.basename(d).lower() == persona_lower:
-                logs = logs_of(d)
-                if logs:
-                    log_debug(f"auto_logs_dir: игрок по PersonaName Steam '{persona}'")
-                    return logs
+        persona = steam_persona_name()
+        if persona:
+            persona_lower = persona.lower()
+            for d in subs:
+                if os.path.basename(d).lower() == persona_lower:
+                    logs = logs_of(d)
+                    if logs:
+                        log_debug(f"auto_logs_dir: игрок по PersonaName Steam '{persona}' ({players_root})")
+                        return logs
 
-    def last_activity(logs):
+        def last_activity(logs):
+            try:
+                return max(os.path.getmtime(os.path.join(logs, f))
+                           for f in os.listdir(logs))
+            except (ValueError, OSError):
+                return -1
+
+        best = max((logs_of(d) for d in subs),
+                   key=lambda l: last_activity(l) if l else -1)
+        if best:
+            log_debug(f"auto_logs_dir: персонаж по активности логов: "
+                      f"'{os.path.basename(os.path.dirname(best))}' ({players_root})")
+            return best
+    return ""
+
+
+def find_all_logs_dirs():
+    """Все найденные папки логов всех клиентов: [{'name', 'path'}].
+
+    Подходит для мультиоконной игры: Steam + сайт-клиент + любые другие
+    корни из WURM_PLAYERS_ROOTS. Имя — персонаж + тип клиента в скобках,
+    при совпадении имён персонажей тип обязателен, иначе кратко.
+    """
+    candidates = []   # (персонаж, тип, путь)
+    for root in WURM_PLAYERS_ROOTS:
+        if not os.path.isdir(root):
+            continue
+        kind = "Steam" if "steamapps" in root.lower() else "сайт"
         try:
-            return max(os.path.getmtime(os.path.join(logs, f))
-                       for f in os.listdir(logs))
-        except (ValueError, OSError):
-            return -1
-
-    best = max((logs_of(d) for d in subs), key=lambda l: last_activity(l) if l else -1)
-    if best:
-        log_debug(f"auto_logs_dir: персонаж по активности логов: '{os.path.basename(os.path.dirname(best))}'")
-        return best
-    return DEFAULT_LOG_DIR
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for d in names:
+            logs = os.path.join(root, d, "logs")
+            if os.path.isdir(logs):
+                candidates.append((d, kind, logs))
+    # имена персонажей, встречающиеся в нескольких клиентах, — помечаем типом
+    from collections import Counter
+    name_count = Counter(c[0].lower() for c in candidates)
+    seen = set()
+    result = []
+    for char, kind, logs in candidates:
+        key = logs.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        label = f"{char} ({kind})" if name_count[char.lower()] > 1 else char
+        result.append({"name": label, "path": logs})
+    return result
 
 # Отслеживаемые каналы: (имя вкладки, префикс файла, это личка PM__<Имя>.<месяц>.txt)
 CHANNELS = [
@@ -585,16 +631,19 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
 class LogWatcher(threading.Thread):
     """Сканирует файлы каналов и кладёт новые строки в out_queue.
 
-    Элементы: ("line", channel_name, raw_line).
+    Элементы: ("line", client_idx, channel_name, raw_line) — client_idx
+    сопоставляет строку клиенту (вкладке) из конфигурации.
     При первом обнаружении файл позиционируется в конец (только новые
     сообщения), если start_at_end=True.
     """
 
-    def __init__(self, logs_dir, out_queue, stop_event, start_at_end=True):
+    def __init__(self, logs_dir, out_queue, stop_event, client_idx=0,
+                 start_at_end=True):
         super().__init__(daemon=True)
         self.logs_dir = logs_dir
         self.out = out_queue
         self.stop = stop_event
+        self.client_idx = client_idx
         self.start_at_end = start_at_end
         self.offsets = {}          # путь -> позиция
         self.pending = {}          # путь -> незавершённый хвост строки
@@ -666,7 +715,7 @@ class LogWatcher(threading.Thread):
                 for line in complete:
                     line = line.strip()
                     if line and parse_chat_line(line):
-                        self.out.put(("line", name, line))
+                        self.out.put(("line", self.client_idx, name, line))
 
 
 # --------------------------------------------------------------------------- #
@@ -1129,7 +1178,7 @@ class TranslateWorker(threading.Thread):
             return
         if not item or item[0] != "line":
             return
-        _, channel, line = item
+        _, client_idx, channel, line = item
 
         parsed = parse_chat_line(line)
         if parsed:
@@ -1164,7 +1213,7 @@ class TranslateWorker(threading.Thread):
                     if len(self.cache) > TRANSLATE_CACHE_MAX:
                         self.cache.pop(next(iter(self.cache)))
 
-        self.done.put(("done", channel, t, name, body, translated))
+        self.done.put(("done", client_idx, channel, t, name, body, translated))
 
 
 # --------------------------------------------------------------------------- #
@@ -1172,7 +1221,7 @@ class TranslateWorker(threading.Thread):
 # --------------------------------------------------------------------------- #
 
 DEFAULTS = {
-    "logs_dir": DEFAULT_LOG_DIR,
+    "clients": [],           # список {"name", "path"} — по клиенту на копию игры
     "translate": True,
     "sound": False,
     "notify": False,
@@ -1184,19 +1233,25 @@ DEFAULTS = {
 
 
 def load_config():
-    cfg = dict(DEFAULTS)
+    raw = {}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg.update({k: v for k, v in json.load(f).items() if k in cfg})
+                raw = json.load(f)
         except Exception:
-            pass
-    # Имя игрока в пути подставляем автоматически по текущему пользователю
-    # Steam: сохранённый путь сохраняем, только если он существует; иначе —
-    # автоподстановка (players\<текущий игрок>\logs).
-    saved_dir = (cfg.get("logs_dir") or "").strip()
-    if not saved_dir or not os.path.isdir(saved_dir):
-        cfg["logs_dir"] = auto_logs_dir()
+            raw = {}
+    cfg = dict(DEFAULTS)
+    cfg.update({k: v for k, v in raw.items() if k in DEFAULTS})
+    # миграция с версий < 1.5.0: единый путь logs_dir -> список клиентов
+    if not cfg["clients"] and raw.get("logs_dir"):
+        path = raw["logs_dir"]
+        name = os.path.basename(os.path.dirname(path)) or "Клиент"
+        cfg["clients"] = [{"name": name, "path": path}]
+        save_config(cfg)
+    # Путь, который указал пользователь, — священен: используем как есть,
+    # даже если папка сейчас недоступна (другой диск, переименование).
+    # Молчаливая подмена приводила к потере пути при каждом запуске.
+    # Автопоиск (Steam + автономный клиент) работает только по кнопке «Найти».
     return cfg
 
 
@@ -1233,18 +1288,27 @@ def run_gui():
     root.minsize(560, 380)
 
     stop_event = threading.Event()
-    state = {"running": False, "watcher": None, "worker": None,
+    state = {"running": False, "watchers": [], "worker": None,
              "raw": queue.Queue(), "done": queue.Queue()}
 
     # ---------------- верхняя панель ----------------
     top = ttk.Frame(root)
     top.pack(fill="x", padx=8, pady=(8, 2))
-    ttk.Label(top, text="Логи:").pack(side="left")
-    dir_var = tk.StringVar(value=cfg["logs_dir"])
-    ttk.Entry(top, textvariable=dir_var, width=55).pack(side="left", padx=4)
-    ttk.Button(top, text="…", width=3,
-               command=lambda: dir_var.set(
-                   filedialog.askdirectory() or dir_var.get())).pack(side="left")
+    ttk.Label(top, text="Клиенты:").pack(side="left")
+    clients_var = tk.StringVar()
+
+    def clients_summary():
+        cls = cfg.get("clients") or []
+        if not cls:
+            return "не заданы"
+        if len(cls) == 1:
+            return cls[0].get("name") or cls[0].get("path", "")
+        return ", ".join(c.get("name") or c.get("path", "") for c in cls)
+
+    ttk.Label(top, textvariable=clients_var, foreground="#555555").pack(
+        side="left", padx=6)
+    ttk.Button(top, text="Клиенты…",
+               command=lambda: open_clients_dialog()).pack(side="left")
 
     # ---------------- панель флагов ----------------
     flags = ttk.Frame(root)
@@ -1264,58 +1328,131 @@ def run_gui():
     top_chk.config(command=lambda: root.attributes("-topmost", top_var.get()))
 
     # ---------------- вкладки-окна каналов ----------------
-    # Своя полоса вкладок (классические tk.Label): у ttk.Notebook нельзя
-    # перекрасить отдельную вкладку, а нам нужен ярко-синий цвет «непрочитано».
+    # Два уровня вкладок: верхний — клиенты (по одному на каждую копию игры,
+    # для мультиоконной игры), внутри каждого — привычные вкладки каналов.
+    # Классические tk.Label: у ttk.Notebook нельзя перекрасить вкладку
+    # в ярко-синий цвет «непрочитано».
     TAB_FG = "#404040"          # обычный цвет заголовка вкладки
     TAB_FG_UNREAD = "#0066ff"   # ярко-синий — новые сообщения
     TAB_BG_ACTIVE = "#cfe3f5"   # фон активной вкладки
 
-    tabbar = tk.Frame(root)
-    tabbar.pack(fill="x", padx=8)
-    content = ttk.Frame(root)
-    content.pack(fill="both", expand=True, padx=8, pady=4)
-    tabs = {}          # имя канала -> (виджет текста, frame)
-    tab_buttons = {}   # имя канала -> tk.Label-вкладка
-    current_tab = {"name": CHANNELS[0][0]}
-    history = {name: [] for name, _, _ in CHANNELS}  # хранилище для перерисовки
+    clients_holder = tk.Frame(root)
+    clients_holder.pack(fill="both", expand=True, padx=8, pady=4)
 
-    for name, _, _ in CHANNELS:
-        frame = ttk.Frame(content)
-        txt = scrolledtext.ScrolledText(frame, wrap="word", state="disabled",
-                                        font=("Segoe UI", 10))
-        txt.pack(fill="both", expand=True)
-        txt.tag_config("time", foreground="#005a9e")
-        txt.tag_config("name", font=("Segoe UI", 10, "bold"))
-        txt.tag_config("orig", foreground="#777777")
-        txt.tag_config("err", foreground="#cc0000")
-        # Все фреймы накладываются друг на друга на всю область content
-        # (place, НЕ pack — pack разложил бы их полосами), видимый выбирается
-        # через lift() в switch_tab().
-        frame.place(relx=0, rely=0, relwidth=1, relheight=1)
-        tabs[name] = (txt, frame)
-        btn = tk.Label(tabbar, text=name, fg=TAB_FG, padx=8, pady=3,
-                       cursor="hand2", font=("Segoe UI", 9))
-        btn.pack(side="left")
-        btn.bind("<Button-1>", lambda _e, n=name: switch_tab(n))
-        tab_buttons[name] = btn
+    clients_ui = []            # по индексу клиента: его вкладки и окна каналов
+    current_client = {"idx": 0}
+    history = {}               # (индекс клиента, канал) -> список сообщений
 
-    def _paint_tabs():
-        for n, b in tab_buttons.items():
-            if n == current_tab["name"]:
+    def switch_client(idx):
+        current_client["idx"] = idx
+        clients_ui[idx]["frame"].lift()
+        # открыли вкладку клиента — признак «непрочитано» снимается
+        if clients_ui[idx]["btn"] is not None:
+            clients_ui[idx]["btn"].config(fg=TAB_FG)
+        for i, ui in enumerate(clients_ui):
+            b = ui["btn"]
+            if b is None:
+                continue
+            if i == idx:
                 b.config(bg=TAB_BG_ACTIVE, relief="sunken")
             else:
                 b.config(bg=root.cget("bg"), relief="flat")
 
-    def switch_tab(name):
-        current_tab["name"] = name
-        _, frame = tabs[name]
+    def switch_tab(client_idx, name):
+        ui = clients_ui[client_idx]
+        ui["current"]["name"] = name
+        _, frame = ui["tabs"][name]
         frame.lift()
-        # открыли вкладку — признак «непрочитано» снимается
-        tab_buttons[name].config(fg=TAB_FG)
-        _paint_tabs()
+        for n, b in ui["tab_buttons"].items():
+            if n == name:
+                b.config(bg=TAB_BG_ACTIVE, relief="sunken")
+                b.config(fg=TAB_FG)   # открыли вкладку — «непрочитано» снято
+            else:
+                b.config(bg=root.cget("bg"), relief="flat")
 
-    def active_tab_name():
-        return current_tab["name"]
+    def active_channel(client_idx):
+        return clients_ui[client_idx]["current"]["name"]
+
+    def rebuild_clients_area():
+        """Пересоздать область вкладок по текущему списку клиентов.
+
+        История хранится отдельно от виджетов — окна каналов заполняются
+        заново из history, поэтому пересоздание безболезненно.
+        """
+        for w in clients_holder.winfo_children():
+            w.destroy()
+        clients_ui.clear()
+        clients = cfg.get("clients") or []
+        n = len(clients)
+        if n == 0:
+            tk.Label(clients_holder, foreground="#666666",
+                     text="Клиенты не заданы. Нажмите «Клиенты…» и добавьте "
+                          "папку логов …\\players\\<Игрок>\\logs").pack(
+                     anchor="w", padx=8, pady=8)
+            return
+        if n > 1:
+            bar = tk.Frame(clients_holder)
+            bar.pack(fill="x")
+            cont = tk.Frame(clients_holder)
+            cont.pack(fill="both", expand=True)
+        else:
+            bar = None
+            cont = clients_holder
+        for i, cl in enumerate(clients):
+            cframe = tk.Frame(cont)
+            if n > 1:
+                # фреймы клиентов накладываются друг на друга (place), видимый
+                # выбирается через lift() в switch_client()
+                cframe.place(relx=0, rely=0, relwidth=1, relheight=1)
+                cbtn = tk.Label(bar, text=cl.get("name") or f"Клиент {i + 1}",
+                                fg=TAB_FG, padx=10, pady=3, cursor="hand2",
+                                font=("Segoe UI", 9, "bold"))
+                cbtn.pack(side="left")
+                cbtn.bind("<Button-1>", lambda _e, idx=i: switch_client(idx))
+            else:
+                # единственный клиент — просто растягиваем на всю область,
+                # иначе фрейм останется невидимым (нет геометрии — нет окна)
+                cframe.pack(fill="both", expand=True)
+                cbtn = None
+            tabbar = tk.Frame(cframe)
+            tabbar.pack(fill="x")
+            content = ttk.Frame(cframe)
+            content.pack(fill="both", expand=True, pady=(2, 0))
+            tabs = {}
+            tab_buttons = {}
+            for name, _, _ in CHANNELS:
+                frame = ttk.Frame(content)
+                txt = scrolledtext.ScrolledText(frame, wrap="word", state="disabled",
+                                                font=("Segoe UI", 10))
+                txt.pack(fill="both", expand=True)
+                txt.tag_config("time", foreground="#005a9e")
+                txt.tag_config("name", font=("Segoe UI", 10, "bold"))
+                txt.tag_config("orig", foreground="#777777")
+                txt.tag_config("err", foreground="#cc0000")
+                # фреймы каналов накладываются друг на друга (place, НЕ pack —
+                # pack разложил бы их полосами), видимый — через lift()
+                frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+                tabs[name] = (txt, frame)
+                btn = tk.Label(tabbar, text=name, fg=TAB_FG, padx=8, pady=3,
+                               cursor="hand2", font=("Segoe UI", 9))
+                btn.pack(side="left")
+                btn.bind("<Button-1>",
+                         lambda _e, n=name, idx=i: switch_tab(idx, n))
+                tab_buttons[name] = btn
+            clients_ui.append({"btn": cbtn, "frame": cframe, "tabs": tabs,
+                               "tab_buttons": tab_buttons,
+                               "current": {"name": CHANNELS[0][0]}})
+        current_client["idx"] = 0
+        # у каждого клиента поднять его активную вкладку канала — иначе
+        # поверх лежит последний созданный фрейм (PM) и окно выглядит пустым
+        for i in range(len(clients_ui)):
+            switch_tab(i, CHANNELS[0][0])
+        if n > 1:
+            switch_client(0)
+        # восстановили окна — выводим накопленную историю заново
+        for i in range(len(clients_ui)):
+            for ch in clients_ui[i]["tabs"]:
+                rebuild_channel(i, ch)
 
     # ---------------- панель обратного перевода (RU → EN) ----------------
     reply = ttk.Frame(root)
@@ -1388,11 +1525,13 @@ def run_gui():
     run_btn = ttk.Button(bottom, text="▶ Старт")
     run_btn.pack(side="right", padx=4)
     def clear_all():
-        for ch, (w, _f) in tabs.items():
-            w.config(state="normal")
-            w.delete("1.0", "end")
-            w.config(state="disabled")
-            history[ch].clear()
+        for key in list(history):
+            history[key].clear()
+        for ui in clients_ui:
+            for _ch, (w, _f) in ui["tabs"].items():
+                w.config(state="normal")
+                w.delete("1.0", "end")
+                w.config(state="disabled")
 
     clear_btn = ttk.Button(bottom, text="Очистить всё", command=clear_all)
     clear_btn.pack(side="right")
@@ -1403,11 +1542,11 @@ def run_gui():
         if not query:
             return
         results = []
-        for ch_name, entries in history.items():
+        for (ci, ch_name), entries in history.items():
             for (t, name, original, translated) in entries:
                 hay = " ".join(x for x in (name, original, translated) if x).lower()
                 if query in hay:
-                    results.append((ch_name, t, name, original, translated))
+                    results.append((ci, ch_name, t, name, original, translated))
         show_search_results(query, results)
 
     def show_search_results(query, results):
@@ -1421,12 +1560,19 @@ def run_gui():
         txt.tag_config("name", font=("Segoe UI", 10, "bold"))
         txt.tag_config("ch", foreground="#0066ff")
         txt.tag_config("orig", foreground="#777777")
-        lines = []   # индекс строки -> канал для двойного клика
+
+        def result_label(ci, ch_name):
+            cls = cfg.get("clients") or []
+            if len(cls) > 1 and ci < len(cls):
+                return f"{cls[ci].get('name') or 'Клиент ' + str(ci + 1)} · {ch_name}"
+            return ch_name
+
         txt.config(state="normal")
         if not results:
             txt.insert("end", "Ничего не найдено.\n")
-        for (ch_name, t, name, original, translated) in results:
-            txt.insert("end", f"[{ch_name}] ", "ch")
+        lines = []   # индекс строки -> (клиент, канал) для двойного клика
+        for (ci, ch_name, t, name, original, translated) in results:
+            txt.insert("end", f"[{result_label(ci, ch_name)}] ", "ch")
             if t:
                 txt.insert("end", f"[{t}] ", "time")
             if name:
@@ -1435,7 +1581,7 @@ def run_gui():
             if translated and translated != original and orig_var.get():
                 txt.insert("end", original + "\n", "orig")
             txt.insert("end", "\n")
-            lines.append(ch_name)
+            lines.append((ci, ch_name))
         txt.config(state="disabled")
 
         def on_double(_e):
@@ -1445,18 +1591,24 @@ def run_gui():
             except Exception:
                 return
             # строки результата идут парами/тройками, ищем ближайший сверху канал
-            ch = None
+            target = None
             for ln in range(line_no, 0, -1):
-                start = f"{ln}.0"
-                end = f"{ln}.end"
-                content = txt.get(start, end)
+                content = txt.get(f"{ln}.0", f"{ln}.end")
                 if content.startswith("["):
                     m = re.match(r"\[([^\]]+)\]", content)
-                    if m and m.group(1) in tabs:
-                        ch = m.group(1)
+                    if m:
+                        for ci, ch_name in lines:
+                            if m.group(1) == result_label(ci, ch_name):
+                                target = (ci, ch_name)
+                                break
+                    if target:
                         break
-            if ch:
-                switch_tab(ch)
+            if target:
+                ci, ch_name = target
+                if ci < len(clients_ui):
+                    if len(clients_ui) > 1:
+                        switch_client(ci)
+                    switch_tab(ci, ch_name)
 
         txt.bind("<Double-Button-1>", on_double)
         ttk.Label(win, text="Двойной клик по результату — перейти ко вкладке",
@@ -1471,7 +1623,7 @@ def run_gui():
     # ---------------- логика ----------------
     def collect_cfg():
         cfg.update({
-            "logs_dir": dir_var.get().strip(),
+            "clients": list(cfg.get("clients") or []),
             "translate": tr_var.get(),
             "sound": snd_var.get(),
             "notify": ntf_var.get(),
@@ -1503,60 +1655,85 @@ def run_gui():
             txt.insert("end", translated + "\n")    # только перевод
         txt.insert("end", "\n")
 
-    def rebuild_channel(channel):
-        txt, _ = tabs[channel]
+    def rebuild_channel(client_idx, channel):
+        if client_idx >= len(clients_ui):
+            return
+        txt, _ = clients_ui[client_idx]["tabs"][channel]
         txt.config(state="normal")
         txt.delete("1.0", "end")
-        for entry in history[channel]:
+        for entry in history.get((client_idx, channel), []):
             render_entry(txt, entry)
         txt.see("end")
         txt.config(state="disabled")
 
     def refresh_view():
         """Перерисовать все вкладки (например, после переключения «Оригинал»)."""
-        for ch in tabs:
-            rebuild_channel(ch)
+        for i in range(len(clients_ui)):
+            for ch in clients_ui[i]["tabs"]:
+                rebuild_channel(i, ch)
 
     # переключение «Оригинал» применяется и к уже выведенной истории
     orig_var.trace_add("write", lambda *_: refresh_view())
 
-    def append_to(channel, time_s, name, original, translated):
+    def append_to(client_idx, channel, time_s, name, original, translated):
         entry = (time_s, name, original, translated)
-        history[channel].append(entry)
-        if len(history[channel]) > HISTORY_MAX:
-            history[channel] = history[channel][-HISTORY_MAX:]
-            rebuild_channel(channel)   # удалили хвост — перерисовали
-        else:
-            txt, _ = tabs[channel]
+        key = (client_idx, channel)
+        history.setdefault(key, []).append(entry)
+        if len(history[key]) > HISTORY_MAX:
+            history[key] = history[key][-HISTORY_MAX:]
+            rebuild_channel(client_idx, channel)   # удалили хвост — перерисовали
+        elif client_idx < len(clients_ui):
+            txt, _ = clients_ui[client_idx]["tabs"][channel]
             txt.config(state="normal")
             render_entry(txt, entry)
             txt.see("end")
             txt.config(state="disabled")
         # неактивная вкладка с новым сообщением — ярко-синий заголовок
-        if channel != active_tab_name():
-            tab_buttons[channel].config(fg=TAB_FG_UNREAD)
+        if client_idx >= len(clients_ui):
+            return
+        ui = clients_ui[client_idx]
+        if (client_idx != current_client["idx"]
+                or channel != active_channel(client_idx)):
+            ui["tab_buttons"][channel].config(fg=TAB_FG_UNREAD)
+        if ui["btn"] is not None and client_idx != current_client["idx"]:
+            ui["btn"].config(fg=TAB_FG_UNREAD)
 
     def start():
         collect_cfg()
-        if not cfg["logs_dir"] or not os.path.isdir(cfg["logs_dir"]):
-            status_var.set("Укажите существующую папку логов: …\\players\\<Игрок>\\logs")
+        clients = cfg.get("clients") or []
+        if not clients:
+            status_var.set("Добавьте хотя бы одного клиента: кнопка «Клиенты…»")
+            return
+        bad = next((c for c in clients
+                    if not c.get("path") or not os.path.isdir(c["path"])), None)
+        if bad is not None:
+            status_var.set(
+                f"Папка логов недоступна: {bad.get('path')!r} — проверьте в «Клиенты…»")
             return
         stop_event.clear()
         state["raw"] = queue.Queue()
         state["done"] = queue.Queue()
-        state["watcher"] = LogWatcher(cfg["logs_dir"], state["raw"], stop_event,
-                                      start_at_end=True)
+        # по наблюдателю на каждую копию игры — все пишут в общую очередь,
+        # каждое событие помечено индексом клиента
+        state["watchers"] = []
+        for i, cl in enumerate(clients):
+            w = LogWatcher(cl["path"], state["raw"], stop_event,
+                           client_idx=i, start_at_end=True)
+            w.start()
+            state["watchers"].append(w)
         state["worker"] = TranslateWorker(state["raw"], state["done"], stop_event,
                                           enabled=cfg["translate"],
                                           target_lang=cfg.get("target_lang", "ru"))
-        state["watcher"].start()
         state["worker"].start()
         state["running"] = True
         run_btn.config(text="■ Стоп")
         mode = "только новые сообщения (старые пропущены)"
         state["count"] = 0
-        status_var.set(f"Слежу за {len(CHANNELS)} каналами, {mode}")
-        log_debug(f"старт: logs_dir={cfg['logs_dir']} translate={cfg['translate']}")
+        names = ", ".join(c.get("name") or f"Клиент {k + 1}"
+                          for k, c in enumerate(clients))
+        status_var.set(f"Слежу за {len(clients)} клиентом(-ами): {names}. {mode}")
+        log_debug(f"старт: клиенты={[(c.get('name'), c['path']) for c in clients]} "
+                  f"translate={cfg['translate']}")
 
     def stop():
         stop_event.set()
@@ -1571,13 +1748,17 @@ def run_gui():
 
     def supervise():
         """Перезапуск фоновых потоков, если они неожиданно умерли."""
-        if not state["running"]:
+        if not state["running"] or stop_event.is_set():
             return
-        if state["watcher"] is not None and not state["watcher"].is_alive():
-            log_debug("надзор: наблюдатель умер — перезапуск")
-            state["watcher"] = LogWatcher(cfg["logs_dir"], state["raw"], stop_event,
-                                          start_at_end=True)
-            state["watcher"].start()
+        clients = cfg.get("clients") or []
+        for i, w in enumerate(list(state.get("watchers") or [])):
+            if w is None or w.is_alive() or i >= len(clients):
+                continue
+            log_debug(f"надзор: наблюдатель клиента {i} умер — перезапуск")
+            nw = LogWatcher(clients[i]["path"], state["raw"], stop_event,
+                            client_idx=i, start_at_end=True)
+            nw.start()
+            state["watchers"][i] = nw
             status_var.set("Наблюдатель перезапущен после сбоя (см. debug-лог)")
         if state["worker"] is not None and not state["worker"].is_alive():
             log_debug("надзор: переводчик умер — перезапуск")
@@ -1629,15 +1810,20 @@ def run_gui():
                     continue
                 if item[0] != "done":
                     continue
-                _, channel, t, name, body, translated = item
-                append_to(channel, t, name, body, translated)
+                _, client_idx, channel, t, name, body, translated = item
+                append_to(client_idx, channel, t, name, body, translated)
                 state["count"] = state.get("count", 0) + 1
                 status_var.set(f"Работает. Поймано сообщений: {state['count']}. "
                                f"{translator_status_text()}")
                 if snd_var.get():
                     play_sound(cfg.get("sound_file") or None)
                 if ntf_var.get():
-                    show_notification(f"Wurm — {channel}",
+                    cls = cfg.get("clients") or []
+                    label = channel
+                    if len(cls) > 1 and client_idx < len(cls):
+                        label = (f"{cls[client_idx].get('name') or 'Клиент ' + str(client_idx + 1)}"
+                                 f" · {channel}")
+                    show_notification(f"Wurm — {label}",
                                       (translated or body)[:180])
         except queue.Empty:
             pass
@@ -1707,8 +1893,110 @@ def run_gui():
             except Exception as exc:
                 log_debug(f"не удалось открыть страницу релизов: {exc!r}")
 
+    # ---------------- диалог списка клиентов ----------------
+    def open_clients_dialog():
+        """Просмотр и редактирование списка клиентов (папок логов).
+
+        Каждая копия игры (Steam, сайт-клиент, …) — отдельный клиент со
+        своей вкладкой. Автопоиск папок — только по явному запросу кнопкой
+        «Найти всех», никогда сам по себе.
+        """
+        import tkinter.messagebox as mb
+        win = tk.Toplevel(root)
+        win.title("Клиенты — папки логов")
+        win.geometry("640x340")
+        win.transient(root)
+        win.minsize(480, 260)
+
+        tree = ttk.Treeview(win, columns=("name", "path"), show="headings",
+                            height=10, selectmode="extended")
+        tree.heading("name", text="Имя")
+        tree.heading("path", text="Папка логов")
+        tree.column("name", width=150, anchor="w")
+        tree.column("path", width=440, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+
+        def row_values(iid):
+            v = tree.item(iid, "values")
+            return (v[0] if len(v) > 0 else "", v[1] if len(v) > 1 else "")
+
+        def refill():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for i, c in enumerate(cfg.get("clients") or []):
+                tree.insert("", "end", iid=str(i),
+                            values=(c.get("name") or f"Клиент {i + 1}",
+                                    c.get("path", "")))
+
+        def add_row(name="", path=""):
+            iid = str(int(time.time() * 1000) % 10**8 + len(tree.get_children()))
+            tree.insert("", "end", iid=iid,
+                        values=(name or f"Клиент {len(tree.get_children()) + 1}", path))
+
+        def find_all():
+            """Автопоиск папок логов всех клиентов: Steam и сайт-клиент."""
+            found = find_all_logs_dirs()
+            if not found:
+                mb.showinfo(APP_TITLE,
+                            "Папки логов не найдены ни в Steam, "
+                            "ни в автономном клиенте.")
+                return
+            existing = {p.lower() for p in (row_values(i)[1]
+                                            for i in tree.get_children())}
+            added = 0
+            for c in found:
+                if c["path"].lower() not in existing:
+                    add_row(c["name"], c["path"])
+                    existing.add(c["path"].lower())
+                    added += 1
+            if added == 0:
+                mb.showinfo(APP_TITLE, "Все найденные папки уже в списке.")
+
+        def add_manual():
+            d = filedialog.askdirectory(parent=win, title="Папка логов — …\\<Игрок>\\logs")
+            if not d:
+                return
+            name = os.path.basename(os.path.dirname(d)) or \
+                f"Клиент {len(tree.get_children()) + 1}"
+            add_row(name, d)
+
+        def remove_selected():
+            for sel in tree.selection():
+                tree.delete(sel)
+
+        ttk.Button(btns, text="Найти всех", command=find_all).pack(side="left")
+        ttk.Button(btns, text="Добавить…", command=add_manual).pack(side="left", padx=4)
+        ttk.Button(btns, text="Удалить", command=remove_selected).pack(side="left")
+        # «Закрыть» = применить изменения и закрыть (как и крестик окна)
+        ttk.Button(btns, text="Закрыть",
+                   command=lambda: on_close_dialog()).pack(side="right")
+
+        def apply_and_refresh():
+            cfg["clients"] = [
+                {"name": row_values(iid)[0] or f"Клиент {k + 1}",
+                 "path": row_values(iid)[1]}
+                for k, iid in enumerate(tree.get_children())]
+            save_config(cfg)
+            clients_var.set(clients_summary())
+            rebuild_clients_area()
+            if state.get("running"):
+                # набор клиентов изменился — перезапускаем слежение
+                stop()
+                start()
+
+        def on_close_dialog():
+            apply_and_refresh()
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close_dialog)
+        refill()
+
     root.protocol("WM_DELETE_WINDOW", on_close)
-    switch_tab(CHANNELS[0][0])      # поднять первую вкладку
+    clients_var.set(clients_summary())
+    rebuild_clients_area()          # построить вкладки по списку клиентов
     root.after(100, poll)
     root.after(300, start)          # слежение запускается сразу при старте
     root.after(5000, check_updates_silent)   # проверка обновлений — в фоне

@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -134,6 +134,20 @@ def log_debug(msg):
             f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
     except Exception:
         pass
+
+
+def bind_copy(widget):
+    """Ctrl-C / Ctrl-Insert в read-only Text: Tk на Windows не копирует сам."""
+    def _copy(_event=None):
+        try:
+            sel = widget.get("sel.first", "sel.last")
+        except tk.TclError:
+            return None    # выделения нет — не мешаем дальнейшей обработке
+        widget.clipboard_clear()
+        widget.clipboard_append(sel)
+        return "break"
+    for seq in ("<Control-c>", "<Control-C>", "<Control-Insert>"):
+        widget.bind(seq, _copy)
 
 
 def _excepthook(exc_type, exc, tb):
@@ -283,7 +297,7 @@ def find_all_logs_dirs():
     for root in WURM_PLAYERS_ROOTS:
         if not os.path.isdir(root):
             continue
-        kind = "Steam" if "steamapps" in root.lower() else "сайт"
+        kind = tr("kind_steam") if "steamapps" in root.lower() else tr("kind_site")
         try:
             names = sorted(os.listdir(root))
         except OSError:
@@ -356,12 +370,12 @@ def translator_status_text():
     """Человекочитаемый статус переводчика для статусной строки."""
     st = TRANSLATOR_STATE.get("backend")
     if st == "gtx":
-        return "перевод: Google ✓"
+        return tr("backend_gtx")
     if st == "mymemory":
-        return "перевод: запасной сервис"
+        return tr("backend_mymemory")
     if st == "fallback":
-        return "перевод: Google в перерыве, запасной сервис"
-    return "перевод: нет данных"
+        return tr("backend_fallback")
+    return tr("backend_unknown")
 
 
 def _find_curl():
@@ -406,7 +420,7 @@ def _http_get(url, timeout=GTX_TIMEOUT):
         return resp.read().decode("utf-8", "replace")
 
 
-def google_gtx_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
+def google_gtx_translate_ex(text, dst="ru", src=None, timeout=GTX_TIMEOUT):
     """Перевод через Google gtx. Возвращает (перевод, исходный язык) или (None, None)."""
     global GTX_LAST_ERROR
     GTX_LAST_ERROR = None
@@ -414,8 +428,8 @@ def google_gtx_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
         return text, "auto"
     if len(text) > TRANSLATE_MAX_CHARS:
         return None, None
-    params = urllib.parse.urlencode({"client": "gtx", "sl": "auto", "tl": dst,
-                                     "dt": "t", "q": text})
+    params = urllib.parse.urlencode({"client": "gtx", "sl": src or "auto",
+                                     "tl": dst, "dt": "t", "q": text})
     try:
         data = json.loads(_http_get(f"{GTX_URL}?{params}", timeout=timeout))
         detected_src = "auto"
@@ -433,13 +447,14 @@ def google_gtx_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
         return None, None
 
 
-def mymemory_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
-    """Запасной перевод через MyMemory (без ключа, язык определяет сам)."""
+def mymemory_translate_ex(text, dst="ru", src=None, timeout=GTX_TIMEOUT):
+    """Запасной перевод через MyMemory (без ключа; src=None — автоопределение)."""
     if not text or len(text) > 400:
         return None, None
     try:
+        langpair = f"{src}|{dst}" if src else f"Autodetect|{dst}"
         url = "https://api.mymemory.translated.net/get?" + urllib.parse.urlencode(
-            {"q": text, "langpair": f"Autodetect|{dst}"})
+            {"q": text, "langpair": langpair})
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
@@ -455,20 +470,21 @@ def mymemory_translate_ex(text, dst="ru", timeout=GTX_TIMEOUT):
         return None, None
 
 
-def _mymemory_with_state(text, dst="ru", fallback=False):
+def _mymemory_with_state(text, dst="ru", src=None, fallback=False):
     """MyMemory + обновление индикатора состояния переводчика."""
-    translated, detected = mymemory_translate_ex(text, dst=dst)
+    translated, detected = mymemory_translate_ex(text, dst=dst, src=src)
     if translated is not None:
         TRANSLATOR_STATE["backend"] = "fallback" if fallback else "mymemory"
     return translated, detected
 
 
-def translate_auto(text, dst="ru"):
-    """Цепочка бэкендов: Google gtx (с выключателем при 429) → MyMemory."""
+def translate_auto(text, dst="ru", src=None):
+    """Цепочка бэкендов: Google gtx (с выключателем при 429) → MyMemory.
+    src=None — исходный язык определяет сам переводчик."""
     global GTX_BANNED_UNTIL, GTX_FAILS
     if time.monotonic() < GTX_BANNED_UNTIL:
-        return _mymemory_with_state(text, dst=dst, fallback=True)
-    translated, detected = google_gtx_translate_ex(text, dst=dst)
+        return _mymemory_with_state(text, dst=dst, src=src, fallback=True)
+    translated, detected = google_gtx_translate_ex(text, dst=dst, src=src)
     if translated is not None:
         GTX_FAILS = 0
         TRANSLATOR_STATE["backend"] = "gtx"
@@ -480,20 +496,27 @@ def translate_auto(text, dst="ru"):
             GTX_FAILS = 0
             log_debug(f"translate: gtx банит (429), перерыв {GTX_BAN_SECONDS // 60} мин, "
                       f"перевод через MyMemory")
-        return _mymemory_with_state(text, dst=dst, fallback=True)
-    return _mymemory_with_state(text, dst=dst)
+        return _mymemory_with_state(text, dst=dst, src=src, fallback=True)
+    return _mymemory_with_state(text, dst=dst, src=src)
 
 
 def translate_preserving_names(text, dst="ru"):
-    """Переводит текст, не трогая <ИмяПерсонажа>, и добавляет код языка в конце."""
+    """Переводит текст, не трогая <ИмяПерсонажа>, и добавляет код языка в конце.
+
+    Возвращает (текст, исходный язык); язык — реальный код либо None."""
     def with_lang(translated, detected):
         lang = detected if detected and detected != "auto" else "und"
         return f"{translated} ({lang})"
 
+    def real_lang(detected):
+        return detected if detected and detected != "auto" else None
+
     parts = NAME_TOKEN_RE.split(text)
     if len(parts) == 1:
         translated, detected = translate_auto(text, dst=dst)
-        return with_lang(translated, detected) if translated else None
+        if not translated:
+            return None, None
+        return with_lang(translated, detected), real_lang(detected)
 
     translated_parts = []
     detected_src = None
@@ -511,7 +534,7 @@ def translate_preserving_names(text, dst="ru"):
             continue
         piece, piece_src = translate_auto(part, dst=dst)
         if piece is None:
-            return None
+            return None, None
         if detected_src is None and piece_src and piece_src != "auto":
             detected_src = piece_src
         if (need_space_after_name and translated_parts and piece
@@ -522,7 +545,10 @@ def translate_preserving_names(text, dst="ru"):
         need_space_after_name = False
 
     translated = "".join(translated_parts).strip()
-    return with_lang(translated, detected_src) if translated else None
+    if not translated:
+        return None, None
+    return with_lang(translated, detected_src), \
+        detected_src if detected_src and detected_src != "auto" else None
 
 
 # --------------------------------------------------------------------------- #
@@ -735,7 +761,9 @@ RE_TRADE_PREFIX = re.compile(r"^(?:\(([A-Za-z]{2,10})\)\s*)?(WTS|WTB|WTT|PC)\b[:
 
 
 def translate_trade_body(body, dst="ru"):
-    """WTS/WTB/PC в начале — фиксированный перевод, остаток — обычная цепочка."""
+    """WTS/WTB/PC в начале — фиксированный перевод, остаток — обычная цепочка.
+
+    Возвращает (текст, исходный язык); язык — реальный код либо None."""
     m = RE_TRADE_PREFIX.match(body)
     if not m:
         return translate_preserving_names(body, dst=dst)
@@ -746,15 +774,16 @@ def translate_trade_body(body, dst="ru"):
     if server:
         head = f"({server}) {head}"
     if not rest.strip():
-        return f"{head} (en)"
+        return f"{head} (en)", "en"
     if dst == "ru" and re.search(r"[А-Яа-яЁё]", rest):
         tail, lang = rest, "ru"   # остаток уже на русском
     else:
         tail, detected = translate_auto(rest, dst=dst)
         if tail is None:
-            return None
+            return None, None
         lang = detected if detected and detected != "auto" else "und"
-    return f"{head} {tail} ({lang})"
+    real = lang if lang != "und" else None
+    return f"{head} {tail} ({lang})", real
 
 
 # --------------------------------------------------------------------------- #
@@ -961,7 +990,7 @@ def open_glossary_editor(parent):
     from tkinter import ttk
 
     win = tk.Toplevel(parent)
-    win.title(f"Словарь терминов — {APP_TITLE}")
+    win.title(f"{tr('glossary_title')} — {tr('app_title')}")
     win.geometry("820x440")
     win.minsize(640, 320)
     win.transient(parent)
@@ -973,10 +1002,10 @@ def open_glossary_editor(parent):
     table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
     cols = ("en", "ru", "fix", "fix_en")
     table = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
-    table.heading("en", text="Англ. термин")
-    table.heading("ru", text="Перевод")
-    table.heading("fix", text="Кривые варианты RU")
-    table.heading("fix_en", text="Кривые варианты EN")
+    table.heading("en", text=tr("col_en"))
+    table.heading("ru", text=tr("col_ru"))
+    table.heading("fix", text=tr("col_fix"))
+    table.heading("fix_en", text=tr("col_fix_en"))
     table.column("en", width=130, anchor="w")
     table.column("ru", width=130, anchor="w")
     table.column("fix", width=200, anchor="w")
@@ -1001,10 +1030,9 @@ def open_glossary_editor(parent):
     def autosave():
         try:
             glossary_save_items(items)
-            status_var.set(f"Записей: {len(items)} — каждое изменение "
-                           f"сохраняется сразу и действует без перезапуска")
+            status_var.set(tr("glossary_status", n=len(items)))
         except Exception as exc:
-            status_var.set(f"Ошибка сохранения: {exc}")
+            status_var.set(tr("glossary_save_err", exc=exc))
             log_debug(f"словарь: ошибка сохранения: {exc!r}")
 
     # ---------- правка прямо в ячейке ----------
@@ -1114,14 +1142,14 @@ def open_glossary_editor(parent):
         refresh()
         autosave()
 
-    ttk.Button(btns, text="➕ Добавить", command=add_row).pack(side="left")
-    ttk.Button(btns, text="Удалить выбранное", command=delete_selected).pack(
+    ttk.Button(btns, text=tr("btn_add_row"), command=add_row).pack(side="left")
+    ttk.Button(btns, text=tr("btn_delete_sel"), command=delete_selected).pack(
         side="left", padx=4)
-    ttk.Button(btns, text="Открыть файл…",
+    ttk.Button(btns, text=tr("btn_open_file"),
                command=lambda: os.startfile(GLOSSARY_FILE)).pack(side="left", padx=8)
 
     # ---------- низ: проверка фразы ----------
-    test = ttk.LabelFrame(win, text="Проверить фразу (как после перевода)")
+    test = ttk.LabelFrame(win, text=tr("test_frame"))
     test.pack(fill="x", padx=8, pady=(4, 4))
     test_var = tk.StringVar()
     test_entry = ttk.Entry(test, textvariable=test_var)
@@ -1189,31 +1217,35 @@ class TranslateWorker(threading.Thread):
             return  # пустые строки вида "[17:33:11] "
 
         translated = None
+        src_lang = None
         if self.enabled and body:
             trade_prefixed = channel == "Trade" and bool(RE_TRADE_PREFIX.match(body))
             if (self.target_lang == "ru" and re.search(r"[А-Яа-яЁё]", body)
                     and not trade_prefixed):
                 translated = body  # уже на русском — перевод не нужен
+                src_lang = "ru"
             elif body in self.cache:
-                translated = self.cache[body]
+                translated, src_lang = self.cache[body]
             else:
                 pause = TRANSLATE_INTERVAL - (time.monotonic() - self._last_req)
                 if pause > 0:
                     time.sleep(pause)
                 if trade_prefixed:
-                    translated = translate_trade_body(body, self.target_lang)
+                    translated, src_lang = translate_trade_body(body, self.target_lang)
                 else:
-                    translated = translate_preserving_names(body, self.target_lang)
+                    translated, src_lang = translate_preserving_names(
+                        body, self.target_lang)
                 self._last_req = time.monotonic()
                 if translated is not None:
                     # Пост-обработка словарём до кэша: кэш хранит финальный вид.
                     if self.target_lang == "ru":
                         translated = glossary_fix(translated, "ru")
-                    self.cache[body] = translated
+                    self.cache[body] = (translated, src_lang)
                     if len(self.cache) > TRANSLATE_CACHE_MAX:
                         self.cache.pop(next(iter(self.cache)))
 
-        self.done.put(("done", client_idx, channel, t, name, body, translated))
+        self.done.put(("done", client_idx, channel, t, name, body, translated,
+                       src_lang))
 
 
 # --------------------------------------------------------------------------- #
@@ -1228,7 +1260,9 @@ DEFAULTS = {
     "on_top": False,
     "show_original": False,
     "sound_file": "",
-    "target_lang": "ru",
+    "target_lang": "auto",   # auto → определить по языку клиента Steam
+    "reply_src": "",         # "" → как основной язык перевода; иначе явный код
+    "reply_dst": "en",       # панель ответа: на какой язык переводить
 }
 
 
@@ -1264,6 +1298,627 @@ def save_config(cfg):
 
 
 # --------------------------------------------------------------------------- #
+# Локализация интерфейса
+# --------------------------------------------------------------------------- #
+# Язык интерфейса = язык перевода чата. «auto» — определить по языку клиента
+# Steam (реестр). Названия языков в списке выбора — на родных языках: даже
+# если случайно выбрать непонятный, свой всегда можно найти в списке.
+UI_LANG = "ru"   # действующий язык интерфейса; задаётся в начале run_gui
+
+# (код, название на родном языке) — порядок = порядок в списке выбора
+LANGUAGES = [
+    ("auto", "Auto"),
+    ("ru", "Русский"),
+    ("en", "English"),
+    ("pt", "Português"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("zh", "中文"),
+]
+SUPPORTED_LANGS = [code for code, _ in LANGUAGES if code != "auto"]
+
+# Язык Steam (значение реестра) -> код интерфейса
+STEAM_LANG_MAP = {
+    "russian": "ru", "english": "en", "portuguese": "pt",
+    "german": "de", "spanish": "es", "french": "fr",
+    "schinese": "zh", "tchinese": "zh",
+}
+
+# Названия целевых языков в речи каждого языка интерфейса
+# («Перевод на русский» / «Translate to Russian» / «Traduzir para russo»…)
+LANG_OBJ = {
+    "ru": {"ru": "русский", "en": "английский", "pt": "португальский",
+           "de": "немецкий", "es": "испанский", "fr": "французский",
+           "zh": "китайский"},
+    "en": {"ru": "Russian", "en": "English", "pt": "Portuguese",
+           "de": "German", "es": "Spanish", "fr": "French", "zh": "Chinese"},
+    "pt": {"ru": "russo", "en": "inglês", "pt": "português",
+           "de": "alemão", "es": "espanhol", "fr": "francês", "zh": "chinês"},
+    "de": {"ru": "Russisch", "en": "Englisch", "pt": "Portugiesisch",
+           "de": "Deutsch", "es": "Spanisch", "fr": "Französisch",
+           "zh": "Chinesisch"},
+    "es": {"ru": "ruso", "en": "inglés", "pt": "portugués",
+           "de": "alemán", "es": "español", "fr": "francés", "zh": "chino"},
+    "fr": {"ru": "russe", "en": "anglais", "pt": "portugais",
+           "de": "allemand", "es": "espagnol", "fr": "français",
+           "zh": "chinois"},
+    "zh": {"ru": "俄语", "en": "英语", "pt": "葡萄牙语",
+           "de": "德语", "es": "西班牙语", "fr": "法语", "zh": "中文"},
+}
+
+I18N = {
+    "ru": {
+        "app_title": "Wurm Chat — переводчик",
+        "clients_label": "Клиенты:",
+        "clients_btn": "Клиенты…",
+        "clients_none": "не заданы",
+        "lang_label": "Язык:",
+        "chk_translate": "Перевод на {lang}",
+        "chk_sound": "Звук",
+        "chk_notify": "Уведомления",
+        "chk_original": "Оригинал",
+        "chk_on_top": "Поверх окон",
+        "reply_label": "Ответ:",
+        "ctx_reply": "Ответить",
+        "btn_start": "▶ Старт",
+        "btn_stop": "■ Стоп",
+        "btn_clear": "Очистить всё",
+        "btn_search": "🔍 Найти",
+        "glossary_link": "Словарь",
+        "no_clients_hint": "Клиенты не заданы. Нажмите «Клиенты…» и добавьте "
+                           "папку логов …\\players\\<Игрок>\\logs",
+        "status_stopped": "Остановлено",
+        "status_add_client": "Добавьте хотя бы одного клиента: кнопка «Клиенты…»",
+        "status_bad_path": "Папка логов недоступна: {path} — проверьте в «Клиенты…»",
+        "status_watching": "Слежу за {n} клиентом(-ами): {names}. {mode}",
+        "status_mode_tail": "только новые сообщения (старые пропущены)",
+        "status_running": "Работает. Поймано сообщений: {n}. {backend}",
+        "status_copied": "Скопировано в буфер: {text}",
+        "status_translate_fail": "(не удалось перевести)",
+        "backend_gtx": "перевод: Google ✓",
+        "backend_mymemory": "перевод: запасной сервис",
+        "backend_fallback": "перевод: Google в перерыве, запасной сервис",
+        "backend_unknown": "перевод: нет данных",
+        "watcher_restarted": "Наблюдатель перезапущен после сбоя (см. debug-лог)",
+        "worker_restarted": "Переводчик перезапущен после сбоя (см. debug-лог)",
+        "msg_untranslated": "(не удалось перевести)",
+        "search_title": "Поиск: {query} — найдено: {n}",
+        "search_empty": "Ничего не найдено.",
+        "search_hint": "Двойной клик по результату — перейти ко вкладке",
+        "tray_show": "Показать",
+        "tray_quit": "Выход",
+        "update_msg": "Доступна новая версия v{new} (у вас v{cur}).\n\n"
+                      "Открыть страницу загрузки?\n"
+                      "(Скачанный exe можно положить поверх старого — "
+                      "настройки сохранятся)",
+        "instance_msg": "Приложение уже запущено.\n\n"
+                        "Да — активировать уже запущенное\n"
+                        "Нет — закрыть его и запустить новое\n"
+                        "Отмена — ничего не делать",
+        "dlg_clients_title": "Клиенты — папки логов",
+        "col_name": "Имя",
+        "col_path": "Папка логов",
+        "btn_find_all": "Найти всех",
+        "btn_add": "Добавить…",
+        "btn_remove": "Удалить",
+        "btn_close": "Закрыть",
+        "client_default": "Клиент {n}",
+        "find_none": "Папки логов не найдены ни в Steam, ни в автономном клиенте.",
+        "find_all_present": "Все найденные папки уже в списке.",
+        "add_dir_title": "Папка логов — …\\<Игрок>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "сайт",
+        "glossary_title": "Словарь терминов",
+        "col_en": "Англ. термин",
+        "col_ru": "Перевод",
+        "col_fix": "Кривые варианты RU",
+        "col_fix_en": "Кривые варианты EN",
+        "btn_add_row": "➕ Добавить",
+        "btn_delete_sel": "Удалить выбранное",
+        "btn_open_file": "Открыть файл…",
+        "test_frame": "Проверить фразу (как после перевода)",
+        "glossary_status": "Записей: {n} — каждое изменение сохраняется сразу "
+                           "и действует без перезапуска",
+        "glossary_save_err": "Ошибка сохранения: {exc}",
+        "err_output": "Ошибка вывода: {exc}",
+    },
+    "en": {
+        "app_title": "Wurm Chat Translator",
+        "clients_label": "Clients:",
+        "clients_btn": "Clients…",
+        "clients_none": "not set",
+        "lang_label": "Language:",
+        "chk_translate": "Translate to {lang}",
+        "chk_sound": "Sound",
+        "chk_notify": "Notifications",
+        "chk_original": "Original",
+        "chk_on_top": "Always on top",
+        "reply_label": "Reply:",
+        "ctx_reply": "Reply",
+        "btn_start": "▶ Start",
+        "btn_stop": "■ Stop",
+        "btn_clear": "Clear all",
+        "btn_search": "🔍 Find",
+        "glossary_link": "Glossary",
+        "no_clients_hint": "No clients set. Click “Clients…” and add a logs "
+                           "folder …\\players\\<Player>\\logs",
+        "status_stopped": "Stopped",
+        "status_add_client": "Add at least one client: the “Clients…” button",
+        "status_bad_path": "Logs folder unavailable: {path} — check in “Clients…”",
+        "status_watching": "Watching {n} client(s): {names}. {mode}",
+        "status_mode_tail": "new messages only (old ones skipped)",
+        "status_running": "Running. Messages caught: {n}. {backend}",
+        "status_copied": "Copied to clipboard: {text}",
+        "status_translate_fail": "(translation failed)",
+        "backend_gtx": "translation: Google ✓",
+        "backend_mymemory": "translation: fallback service",
+        "backend_fallback": "translation: Google cooling down, fallback service",
+        "backend_unknown": "translation: no data",
+        "watcher_restarted": "Watcher restarted after a crash (see debug log)",
+        "worker_restarted": "Translator restarted after a crash (see debug log)",
+        "msg_untranslated": "(failed to translate)",
+        "search_title": "Search: {query} — found: {n}",
+        "search_empty": "Nothing found.",
+        "search_hint": "Double-click a result to jump to its tab",
+        "tray_show": "Show",
+        "tray_quit": "Exit",
+        "update_msg": "A new version v{new} is available (you have v{cur}).\n\n"
+                      "Open the download page?\n"
+                      "(You can place the downloaded exe over the old one — "
+                      "settings are kept)",
+        "instance_msg": "The application is already running.\n\n"
+                        "Yes — activate the running one\n"
+                        "No — close it and start a new one\n"
+                        "Cancel — do nothing",
+        "dlg_clients_title": "Clients — log folders",
+        "col_name": "Name",
+        "col_path": "Log folder",
+        "btn_find_all": "Find all",
+        "btn_add": "Add…",
+        "btn_remove": "Remove",
+        "btn_close": "Close",
+        "client_default": "Client {n}",
+        "find_none": "No log folders found in Steam or the standalone client.",
+        "find_all_present": "All found folders are already in the list.",
+        "add_dir_title": "Log folder — …\\<Player>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "site",
+        "glossary_title": "Game glossary",
+        "col_en": "EN term",
+        "col_ru": "Translation",
+        "col_fix": "Broken RU variants",
+        "col_fix_en": "Broken EN variants",
+        "btn_add_row": "➕ Add",
+        "btn_delete_sel": "Delete selected",
+        "btn_open_file": "Open file…",
+        "test_frame": "Test a phrase (as after translation)",
+        "glossary_status": "Entries: {n} — every change is saved immediately "
+                           "and applies without a restart",
+        "glossary_save_err": "Save error: {exc}",
+        "err_output": "Output error: {exc}",
+    },
+    "pt": {
+        "app_title": "Wurm Chat — Tradutor",
+        "clients_label": "Clientes:",
+        "clients_btn": "Clientes…",
+        "clients_none": "não definidos",
+        "lang_label": "Idioma:",
+        "chk_translate": "Traduzir para {lang}",
+        "chk_sound": "Som",
+        "chk_notify": "Notificações",
+        "chk_original": "Original",
+        "chk_on_top": "Sempre visível",
+        "reply_label": "Responder:",
+        "ctx_reply": "Responder",
+        "btn_start": "▶ Iniciar",
+        "btn_stop": "■ Parar",
+        "btn_clear": "Limpar tudo",
+        "btn_search": "🔍 Buscar",
+        "glossary_link": "Glossário",
+        "no_clients_hint": "Sem clientes. Clique em «Clientes…» e adicione a "
+                           "pasta de logs …\\players\\<Jogador>\\logs",
+        "status_stopped": "Parado",
+        "status_add_client": "Adicione pelo menos um cliente: botão «Clientes…»",
+        "status_bad_path": "Pasta de logs indisponível: {path} — verifique em "
+                           "«Clientes…»",
+        "status_watching": "Observando {n} cliente(s): {names}. {mode}",
+        "status_mode_tail": "apenas mensagens novas (antigas ignoradas)",
+        "status_running": "Funcionando. Mensagens capturadas: {n}. {backend}",
+        "status_copied": "Copiado para a área de transferência: {text}",
+        "status_translate_fail": "(falha ao traduzir)",
+        "backend_gtx": "tradução: Google ✓",
+        "backend_mymemory": "tradução: serviço reserva",
+        "backend_fallback": "tradução: Google em pausa, serviço reserva",
+        "backend_unknown": "tradução: sem dados",
+        "watcher_restarted": "Observador reiniciado após falha (veja o log)",
+        "worker_restarted": "Tradutor reiniciado após falha (veja o log)",
+        "msg_untranslated": "(falha ao traduzir)",
+        "search_title": "Busca: {query} — encontrados: {n}",
+        "search_empty": "Nada encontrado.",
+        "search_hint": "Duplo clique num resultado para ir à aba",
+        "tray_show": "Mostrar",
+        "tray_quit": "Sair",
+        "update_msg": "Nova versão v{new} disponível (você tem v{cur}).\n\n"
+                      "Abrir a página de download?\n"
+                      "(O exe baixado pode substituir o antigo — as "
+                      "configurações ficam)",
+        "instance_msg": "O aplicativo já está em execução.\n\n"
+                        "Sim — ativar o em execução\n"
+                        "Não — fechá-lo e iniciar um novo\n"
+                        "Cancelar — não fazer nada",
+        "dlg_clients_title": "Clientes — pastas de logs",
+        "col_name": "Nome",
+        "col_path": "Pasta de logs",
+        "btn_find_all": "Encontrar todos",
+        "btn_add": "Adicionar…",
+        "btn_remove": "Remover",
+        "btn_close": "Fechar",
+        "client_default": "Cliente {n}",
+        "find_none": "Pastas de logs não encontradas no Steam nem no cliente "
+                     "autônomo.",
+        "find_all_present": "Todas as pastas encontradas já estão na lista.",
+        "add_dir_title": "Pasta de logs — …\\<Jogador>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "site",
+        "glossary_title": "Glossário de termos",
+        "col_en": "Termo em inglês",
+        "col_ru": "Tradução",
+        "col_fix": "Variantes RU erradas",
+        "col_fix_en": "Variantes EN erradas",
+        "btn_add_row": "➕ Adicionar",
+        "btn_delete_sel": "Excluir selecionados",
+        "btn_open_file": "Abrir arquivo…",
+        "test_frame": "Testar frase (como após a tradução)",
+        "glossary_status": "Entradas: {n} — cada alteração é salva imediatamente "
+                           "e vale sem reiniciar",
+        "glossary_save_err": "Erro ao salvar: {exc}",
+        "err_output": "Erro de saída: {exc}",
+    },
+    "de": {
+        "app_title": "Wurm Chat — Übersetzer",
+        "clients_label": "Clients:",
+        "clients_btn": "Clients…",
+        "clients_none": "nicht gesetzt",
+        "lang_label": "Sprache:",
+        "chk_translate": "Übersetzen auf {lang}",
+        "chk_sound": "Ton",
+        "chk_notify": "Benachrichtigungen",
+        "chk_original": "Original",
+        "chk_on_top": "Immer im Vordergrund",
+        "reply_label": "Antwort:",
+        "ctx_reply": "Antworten",
+        "btn_start": "▶ Start",
+        "btn_stop": "■ Stopp",
+        "btn_clear": "Alles löschen",
+        "btn_search": "🔍 Suchen",
+        "glossary_link": "Glossar",
+        "no_clients_hint": "Keine Clients gesetzt. Klicken Sie auf „Clients…” "
+                           "und fügen Sie einen Log-Ordner hinzu: "
+                           "…\\players\\<Spieler>\\logs",
+        "status_stopped": "Gestoppt",
+        "status_add_client": "Mindestens einen Client hinzufügen: Schaltfläche "
+                             "„Clients…”",
+        "status_bad_path": "Log-Ordner nicht verfügbar: {path} — prüfen unter "
+                           "„Clients…”",
+        "status_watching": "Beobachte {n} Client(s): {names}. {mode}",
+        "status_mode_tail": "nur neue Nachrichten (alte übersprungen)",
+        "status_running": "Läuft. Nachrichten erfasst: {n}. {backend}",
+        "status_copied": "In die Zwischenablage kopiert: {text}",
+        "status_translate_fail": "(Übersetzung fehlgeschlagen)",
+        "backend_gtx": "Übersetzung: Google ✓",
+        "backend_mymemory": "Übersetzung: Ersatzdienst",
+        "backend_fallback": "Übersetzung: Google pausiert, Ersatzdienst",
+        "backend_unknown": "Übersetzung: keine Daten",
+        "watcher_restarted": "Beobachter nach Absturz neu gestartet (s. Debug-Log)",
+        "worker_restarted": "Übersetzer nach Absturz neu gestartet (s. Debug-Log)",
+        "msg_untranslated": "(Übersetzung fehlgeschlagen)",
+        "search_title": "Suche: {query} — gefunden: {n}",
+        "search_empty": "Nichts gefunden.",
+        "search_hint": "Doppelklick auf ein Ergebnis springt zum Tab",
+        "tray_show": "Anzeigen",
+        "tray_quit": "Beenden",
+        "update_msg": "Neue Version v{new} verfügbar (Sie haben v{cur}).\n\n"
+                      "Download-Seite öffnen?\n"
+                      "(Die heruntergeladene exe kann über die alte gelegt "
+                      "werden — Einstellungen bleiben erhalten)",
+        "instance_msg": "Die Anwendung läuft bereits.\n\n"
+                        "Ja — laufende aktivieren\n"
+                        "Nein — beenden und neue starten\n"
+                        "Abbrechen — nichts tun",
+        "dlg_clients_title": "Clients — Log-Ordner",
+        "col_name": "Name",
+        "col_path": "Log-Ordner",
+        "btn_find_all": "Alle finden",
+        "btn_add": "Hinzufügen…",
+        "btn_remove": "Entfernen",
+        "btn_close": "Schließen",
+        "client_default": "Client {n}",
+        "find_none": "Keine Log-Ordner in Steam oder dem Standalone-Client "
+                     "gefunden.",
+        "find_all_present": "Alle gefundenen Ordner sind bereits in der Liste.",
+        "add_dir_title": "Log-Ordner — …\\<Spieler>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "Standalone",
+        "glossary_title": "Glossar der Begriffe",
+        "col_en": "EN-Begriff",
+        "col_ru": "Übersetzung",
+        "col_fix": "Fehlerhafte RU-Varianten",
+        "col_fix_en": "Fehlerhafte EN-Varianten",
+        "btn_add_row": "➕ Hinzufügen",
+        "btn_delete_sel": "Ausgewählte löschen",
+        "btn_open_file": "Datei öffnen…",
+        "test_frame": "Phrase testen (wie nach der Übersetzung)",
+        "glossary_status": "Einträge: {n} — jede Änderung wird sofort "
+                           "gespeichert und ohne Neustart wirksam",
+        "glossary_save_err": "Speicherfehler: {exc}",
+        "err_output": "Ausgabefehler: {exc}",
+    },
+    "es": {
+        "app_title": "Wurm Chat — Traductor",
+        "clients_label": "Clientes:",
+        "clients_btn": "Clientes…",
+        "clients_none": "sin definir",
+        "lang_label": "Idioma:",
+        "chk_translate": "Traducir a {lang}",
+        "chk_sound": "Sonido",
+        "chk_notify": "Notificaciones",
+        "chk_original": "Original",
+        "chk_on_top": "Siempre visible",
+        "reply_label": "Responder:",
+        "ctx_reply": "Responder",
+        "btn_start": "▶ Iniciar",
+        "btn_stop": "■ Detener",
+        "btn_clear": "Borrar todo",
+        "btn_search": "🔍 Buscar",
+        "glossary_link": "Glosario",
+        "no_clients_hint": "Sin clientes. Pulse «Clientes…» y añada la carpeta "
+                           "de logs …\\players\\<Jugador>\\logs",
+        "status_stopped": "Detenido",
+        "status_add_client": "Añada al menos un cliente: botón «Clientes…»",
+        "status_bad_path": "Carpeta de logs no disponible: {path} — compruébela "
+                           "en «Clientes…»",
+        "status_watching": "Vigilando {n} cliente(s): {names}. {mode}",
+        "status_mode_tail": "solo mensajes nuevos (los antiguos se omiten)",
+        "status_running": "Funcionando. Mensajes capturados: {n}. {backend}",
+        "status_copied": "Copiado al portapapeles: {text}",
+        "status_translate_fail": "(no se pudo traducir)",
+        "backend_gtx": "traducción: Google ✓",
+        "backend_mymemory": "traducción: servicio de respaldo",
+        "backend_fallback": "traducción: Google en pausa, servicio de respaldo",
+        "backend_unknown": "traducción: sin datos",
+        "watcher_restarted": "Observador reiniciado tras un fallo (ver log)",
+        "worker_restarted": "Traductor reiniciado tras un fallo (ver log)",
+        "msg_untranslated": "(no se pudo traducir)",
+        "search_title": "Búsqueda: {query} — encontrados: {n}",
+        "search_empty": "No se encontró nada.",
+        "search_hint": "Doble clic en un resultado para ir a su pestaña",
+        "tray_show": "Mostrar",
+        "tray_quit": "Salir",
+        "update_msg": "Nueva versión v{new} disponible (usted tiene v{cur}).\n\n"
+                      "¿Abrir la página de descarga?\n"
+                      "(El exe descargado puede reemplazar al anterior — la "
+                      "configuración se conserva)",
+        "instance_msg": "La aplicación ya está en ejecución.\n\n"
+                        "Sí — activar la abierta\n"
+                        "No — cerrarla e iniciar una nueva\n"
+                        "Cancelar — no hacer nada",
+        "dlg_clients_title": "Clientes — carpetas de logs",
+        "col_name": "Nombre",
+        "col_path": "Carpeta de logs",
+        "btn_find_all": "Buscar todos",
+        "btn_add": "Añadir…",
+        "btn_remove": "Quitar",
+        "btn_close": "Cerrar",
+        "client_default": "Cliente {n}",
+        "find_none": "No se encontraron carpetas de logs ni en Steam ni en el "
+                     "cliente independiente.",
+        "find_all_present": "Todas las carpetas encontradas ya están en la lista.",
+        "add_dir_title": "Carpeta de logs — …\\<Jugador>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "web",
+        "glossary_title": "Glosario de términos",
+        "col_en": "Término en inglés",
+        "col_ru": "Traducción",
+        "col_fix": "Variantes RU erróneas",
+        "col_fix_en": "Variantes EN erróneas",
+        "btn_add_row": "➕ Añadir",
+        "btn_delete_sel": "Eliminar seleccionados",
+        "btn_open_file": "Abrir archivo…",
+        "test_frame": "Probar frase (como tras la traducción)",
+        "glossary_status": "Entradas: {n} — cada cambio se guarda al instante "
+                           "y aplica sin reiniciar",
+        "glossary_save_err": "Error al guardar: {exc}",
+        "err_output": "Error de salida: {exc}",
+    },
+    "fr": {
+        "app_title": "Wurm Chat — Traducteur",
+        "clients_label": "Clients :",
+        "clients_btn": "Clients…",
+        "clients_none": "non définis",
+        "lang_label": "Langue :",
+        "chk_translate": "Traduire en {lang}",
+        "chk_sound": "Son",
+        "chk_notify": "Notifications",
+        "chk_original": "Original",
+        "chk_on_top": "Toujours au premier plan",
+        "reply_label": "Réponse :",
+        "ctx_reply": "Répondre",
+        "btn_start": "▶ Démarrer",
+        "btn_stop": "■ Arrêter",
+        "btn_clear": "Tout effacer",
+        "btn_search": "🔍 Chercher",
+        "glossary_link": "Glossaire",
+        "no_clients_hint": "Aucun client défini. Cliquez sur « Clients… » et "
+                           "ajoutez le dossier de logs …\\players\\<Joueur>\\logs",
+        "status_stopped": "Arrêté",
+        "status_add_client": "Ajoutez au moins un client : bouton « Clients… »",
+        "status_bad_path": "Dossier de logs indisponible : {path} — vérifiez "
+                           "dans « Clients… »",
+        "status_watching": "Surveillance de {n} client(s) : {names}. {mode}",
+        "status_mode_tail": "nouveaux messages uniquement (anciens ignorés)",
+        "status_running": "En marche. Messages capturés : {n}. {backend}",
+        "status_copied": "Copié dans le presse-papiers : {text}",
+        "status_translate_fail": "(échec de la traduction)",
+        "backend_gtx": "traduction : Google ✓",
+        "backend_mymemory": "traduction : service de secours",
+        "backend_fallback": "traduction : Google en pause, service de secours",
+        "backend_unknown": "traduction : aucune donnée",
+        "watcher_restarted": "Observateur redémarré après un plantage (voir le "
+                             "log)",
+        "worker_restarted": "Traducteur redémarré après un plantage (voir le "
+                            "log)",
+        "msg_untranslated": "(échec de la traduction)",
+        "search_title": "Recherche : {query} — trouvés : {n}",
+        "search_empty": "Rien trouvé.",
+        "search_hint": "Double-clic sur un résultat pour aller à son onglet",
+        "tray_show": "Afficher",
+        "tray_quit": "Quitter",
+        "update_msg": "Nouvelle version v{new} disponible (vous avez v{cur}).\n\n"
+                      "Ouvrir la page de téléchargement ?\n"
+                      "(L'exe téléchargé peut remplacer l'ancien — les "
+                      "réglages sont conservés)",
+        "instance_msg": "L'application est déjà en cours d'exécution.\n\n"
+                        "Oui — activer celle qui tourne\n"
+                        "Non — la fermer et en lancer une nouvelle\n"
+                        "Annuler — ne rien faire",
+        "dlg_clients_title": "Clients — dossiers de logs",
+        "col_name": "Nom",
+        "col_path": "Dossier de logs",
+        "btn_find_all": "Tout trouver",
+        "btn_add": "Ajouter…",
+        "btn_remove": "Supprimer",
+        "btn_close": "Fermer",
+        "client_default": "Client {n}",
+        "find_none": "Aucun dossier de logs trouvé ni dans Steam ni dans le "
+                     "client autonome.",
+        "find_all_present": "Tous les dossiers trouvés sont déjà dans la liste.",
+        "add_dir_title": "Dossier de logs — …\\<Joueur>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "site",
+        "glossary_title": "Glossaire des termes",
+        "col_en": "Terme anglais",
+        "col_ru": "Traduction",
+        "col_fix": "Variantes RU fautives",
+        "col_fix_en": "Variantes EN fautives",
+        "btn_add_row": "➕ Ajouter",
+        "btn_delete_sel": "Supprimer la sélection",
+        "btn_open_file": "Ouvrir le fichier…",
+        "test_frame": "Tester une phrase (comme après la traduction)",
+        "glossary_status": "Entrées : {n} — chaque modification est enregistrée "
+                           "immédiatement et s'applique sans redémarrage",
+        "glossary_save_err": "Erreur d'enregistrement : {exc}",
+        "err_output": "Erreur de sortie : {exc}",
+    },
+    "zh": {
+        "app_title": "Wurm 聊天翻译器",
+        "clients_label": "客户端：",
+        "clients_btn": "客户端…",
+        "clients_none": "未设置",
+        "lang_label": "语言：",
+        "chk_translate": "翻译为{lang}",
+        "chk_sound": "声音",
+        "chk_notify": "通知",
+        "chk_original": "原文",
+        "chk_on_top": "置顶",
+        "reply_label": "回复：",
+        "ctx_reply": "回复",
+        "btn_start": "▶ 开始",
+        "btn_stop": "■ 停止",
+        "btn_clear": "全部清除",
+        "btn_search": "🔍 搜索",
+        "glossary_link": "词典",
+        "no_clients_hint": "尚未设置客户端。点击「客户端…」添加日志文件夹 "
+                           "…\\players\\<玩家>\\logs",
+        "status_stopped": "已停止",
+        "status_add_client": "请至少添加一个客户端：「客户端…」按钮",
+        "status_bad_path": "日志文件夹不可用：{path} — 请在「客户端…」中检查",
+        "status_watching": "正在监视 {n} 个客户端：{names}。{mode}",
+        "status_mode_tail": "仅新消息（跳过旧消息）",
+        "status_running": "运行中。已捕获消息：{n}。{backend}",
+        "status_copied": "已复制到剪贴板：{text}",
+        "status_translate_fail": "（翻译失败）",
+        "backend_gtx": "翻译：Google ✓",
+        "backend_mymemory": "翻译：备用服务",
+        "backend_fallback": "翻译：Google 暂停中，使用备用服务",
+        "backend_unknown": "翻译：无数据",
+        "watcher_restarted": "监视器崩溃后已重启（见调试日志）",
+        "worker_restarted": "翻译器崩溃后已重启（见调试日志）",
+        "msg_untranslated": "（无法翻译）",
+        "search_title": "搜索：{query} — 找到 {n} 条",
+        "search_empty": "未找到结果。",
+        "search_hint": "双击结果跳转到对应标签页",
+        "tray_show": "显示",
+        "tray_quit": "退出",
+        "update_msg": "新版本 v{new} 可用（当前 v{cur}）。\n\n"
+                      "打开下载页面？\n"
+                      "（下载的 exe 可直接覆盖旧文件 — 设置会保留）",
+        "instance_msg": "应用程序已在运行。\n\n"
+                        "是 — 激活正在运行的实例\n"
+                        "否 — 关闭它并启动新实例\n"
+                        "取消 — 不做任何操作",
+        "dlg_clients_title": "客户端 — 日志文件夹",
+        "col_name": "名称",
+        "col_path": "日志文件夹",
+        "btn_find_all": "查找全部",
+        "btn_add": "添加…",
+        "btn_remove": "删除",
+        "btn_close": "关闭",
+        "client_default": "客户端 {n}",
+        "find_none": "在 Steam 和独立客户端中均未找到日志文件夹。",
+        "find_all_present": "所有找到的文件夹均已在列表中。",
+        "add_dir_title": "日志文件夹 — …\\<玩家>\\logs",
+        "kind_steam": "Steam",
+        "kind_site": "独立客户端",
+        "glossary_title": "游戏术语词典",
+        "col_en": "英文术语",
+        "col_ru": "翻译",
+        "col_fix": "错误的俄语变体",
+        "col_fix_en": "错误的英语变体",
+        "btn_add_row": "➕ 添加",
+        "btn_delete_sel": "删除所选",
+        "btn_open_file": "打开文件…",
+        "test_frame": "测试短语（翻译后的效果）",
+        "glossary_status": "词条：{n} — 每次修改立即保存，无需重启即可生效",
+        "glossary_save_err": "保存错误：{exc}",
+        "err_output": "输出错误：{exc}",
+    },
+}
+
+
+def tr(key, **kw):
+    """Строка интерфейса на текущем языке; непереведённое — с русским."""
+    s = I18N.get(UI_LANG, {}).get(key) or I18N["ru"].get(key) or key
+    return s.format(**kw) if kw else s
+
+
+def steam_language():
+    """Язык интерфейса Steam из реестра: 'russian', 'english', … или None."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Valve\Steam") as k:
+            val, _t = winreg.QueryValueEx(k, "Language")
+        return (val or "").strip().lower() or None
+    except Exception:
+        return None
+
+
+def resolve_target_lang(cfg_value):
+    """Код языка перевода из настройки ('auto' → язык Steam → русский)."""
+    if cfg_value and cfg_value != "auto":
+        return cfg_value if cfg_value in SUPPORTED_LANGS else "ru"
+    return STEAM_LANG_MAP.get(steam_language() or "", "ru")
+
+
+def resolve_ui_lang(cfg_value):
+    """Код языка интерфейса (для tr): из настройки, 'auto' → язык Steam."""
+    return resolve_target_lang(cfg_value)
+
+
+# --------------------------------------------------------------------------- #
 # Графический интерфейс
 # --------------------------------------------------------------------------- #
 
@@ -1281,9 +1936,13 @@ def run_gui():
     from tkinter import filedialog, scrolledtext, ttk
 
     cfg = load_config()
+    target_lang = resolve_target_lang(cfg.get("target_lang"))
+    # Язык интерфейса = язык перевода; без явного выбора — по языку Steam
+    global UI_LANG
+    UI_LANG = resolve_ui_lang(cfg.get("target_lang"))
 
     root = tk.Tk()
-    root.title(f"{APP_TITLE} v{APP_VERSION}")
+    root.title(f"{tr('app_title')} v{APP_VERSION}")
     root.geometry("760x560")
     root.minsize(560, 380)
 
@@ -1294,35 +1953,61 @@ def run_gui():
     # ---------------- верхняя панель ----------------
     top = ttk.Frame(root)
     top.pack(fill="x", padx=8, pady=(8, 2))
-    ttk.Label(top, text="Клиенты:").pack(side="left")
+    ttk.Label(top, text=tr("clients_label")).pack(side="left")
     clients_var = tk.StringVar()
 
     def clients_summary():
         cls = cfg.get("clients") or []
         if not cls:
-            return "не заданы"
+            return tr("clients_none")
         if len(cls) == 1:
             return cls[0].get("name") or cls[0].get("path", "")
         return ", ".join(c.get("name") or c.get("path", "") for c in cls)
 
     ttk.Label(top, textvariable=clients_var, foreground="#555555").pack(
         side="left", padx=6)
-    ttk.Button(top, text="Клиенты…",
+    ttk.Button(top, text=tr("clients_btn"),
                command=lambda: open_clients_dialog()).pack(side="left")
+    ttk.Label(top, text=tr("lang_label")).pack(side="left", padx=(14, 2))
+    # Названия языков — на родных языках: случайно выбравший китайский
+    # всегда найдёт «Русский» / «English» в этом списке обратно
+    lang_var = tk.StringVar()
+    lang_combo = ttk.Combobox(top, textvariable=lang_var, state="readonly",
+                              width=11, values=[name for _c, name in LANGUAGES])
+    lang_combo.pack(side="left")
+    cur_setting = cfg.get("target_lang") or "auto"
+    if cur_setting not in [c for c, _n in LANGUAGES]:
+        cur_setting = "auto"
+    lang_var.set(dict(LANGUAGES)[cur_setting])
+
+    def on_lang_change(_e=None):
+        code = {name: c for c, name in LANGUAGES}.get(lang_var.get(), "auto")
+        if code == (cfg.get("target_lang") or "auto"):
+            return
+        cfg["target_lang"] = code
+        save_config(cfg)
+        restart_gui()
+
+    lang_combo.bind("<<ComboboxSelected>>", on_lang_change)
 
     # ---------------- панель флагов ----------------
     flags = ttk.Frame(root)
     flags.pack(fill="x", padx=8, pady=2)
     tr_var = tk.BooleanVar(value=cfg["translate"])
-    ttk.Checkbutton(flags, text="Перевод на русский", variable=tr_var).pack(side="left")
+    ttk.Checkbutton(flags, text=tr("chk_translate",
+                                    lang=LANG_OBJ[UI_LANG][target_lang]),
+                    variable=tr_var).pack(side="left")
     snd_var = tk.BooleanVar(value=cfg["sound"])
-    ttk.Checkbutton(flags, text="Звук", variable=snd_var).pack(side="left", padx=8)
+    ttk.Checkbutton(flags, text=tr("chk_sound"),
+                    variable=snd_var).pack(side="left", padx=8)
     ntf_var = tk.BooleanVar(value=cfg["notify"])
-    ttk.Checkbutton(flags, text="Уведомления", variable=ntf_var).pack(side="left")
+    ttk.Checkbutton(flags, text=tr("chk_notify"),
+                    variable=ntf_var).pack(side="left")
     orig_var = tk.BooleanVar(value=cfg["show_original"])
-    ttk.Checkbutton(flags, text="Оригинал", variable=orig_var).pack(side="left", padx=8)
+    ttk.Checkbutton(flags, text=tr("chk_original"),
+                    variable=orig_var).pack(side="left", padx=8)
     top_var = tk.BooleanVar(value=cfg["on_top"])
-    top_chk = ttk.Checkbutton(flags, text="Поверх окон", variable=top_var)
+    top_chk = ttk.Checkbutton(flags, text=tr("chk_on_top"), variable=top_var)
     top_chk.pack(side="left")
     root.attributes("-topmost", cfg["on_top"])
     top_chk.config(command=lambda: root.attributes("-topmost", top_var.get()))
@@ -1342,6 +2027,46 @@ def run_gui():
     clients_ui = []            # по индексу клиента: его вкладки и окна каналов
     current_client = {"idx": 0}
     history = {}               # (индекс клиента, канал) -> список сообщений
+    entry_starts = {}          # виджет чата -> номера строк, с которых начинаются
+                               # записи history (в том же порядке) — для ПКМ
+
+    def chat_context_menu(event, client_idx, channel):
+        """ПКМ по сообщению: «Ответить» — переключить панель ответа на язык,
+        с которого это сообщение было переведено, и дать фокус ввода."""
+        txt = event.widget
+        try:
+            line = int(str(txt.index(f"@{event.x},{event.y}")).split(".")[0])
+        except Exception:
+            return
+        starts = entry_starts.get(txt) or []
+        idx = None
+        for i, s in enumerate(starts):
+            if s <= line:
+                idx = i
+            else:
+                break
+        if idx is None:
+            return
+        entries = history.get((client_idx, channel)) or []
+        if idx >= len(entries):
+            return
+        _t, _name, original, translated, src = entries[idx]
+        # меню только для реально переведённых с иностранного языка сообщений
+        if not (translated and translated != original
+                and src in SUPPORTED_LANGS):
+            return
+
+        def reply_to():
+            reply_dst_var.set(src)
+            reply_save_langs()          # сохранит выбор и пересчитает текст
+            reply_entry.focus_set()     # курсор — сразу в поле ответа
+
+        menu = tk.Menu(root, tearoff=0)
+        menu.add_command(label=tr("ctx_reply"), command=reply_to)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def switch_client(idx):
         current_client["idx"] = idx
@@ -1386,8 +2111,7 @@ def run_gui():
         n = len(clients)
         if n == 0:
             tk.Label(clients_holder, foreground="#666666",
-                     text="Клиенты не заданы. Нажмите «Клиенты…» и добавьте "
-                          "папку логов …\\players\\<Игрок>\\logs").pack(
+                     text=tr("no_clients_hint")).pack(
                      anchor="w", padx=8, pady=8)
             return
         if n > 1:
@@ -1404,7 +2128,7 @@ def run_gui():
                 # фреймы клиентов накладываются друг на друга (place), видимый
                 # выбирается через lift() в switch_client()
                 cframe.place(relx=0, rely=0, relwidth=1, relheight=1)
-                cbtn = tk.Label(bar, text=cl.get("name") or f"Клиент {i + 1}",
+                cbtn = tk.Label(bar, text=cl.get("name") or tr("client_default", n=i + 1),
                                 fg=TAB_FG, padx=10, pady=3, cursor="hand2",
                                 font=("Segoe UI", 9, "bold"))
                 cbtn.pack(side="left")
@@ -1429,6 +2153,9 @@ def run_gui():
                 txt.tag_config("name", font=("Segoe UI", 10, "bold"))
                 txt.tag_config("orig", foreground="#777777")
                 txt.tag_config("err", foreground="#cc0000")
+                bind_copy(txt)
+                txt.bind("<Button-3>", lambda e, idx=i, ch=name:
+                         chat_context_menu(e, idx, ch))
                 # фреймы каналов накладываются друг на друга (place, НЕ pack —
                 # pack разложил бы их полосами), видимый — через lift()
                 frame.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -1454,13 +2181,25 @@ def run_gui():
             for ch in clients_ui[i]["tabs"]:
                 rebuild_channel(i, ch)
 
-    # ---------------- панель обратного перевода (RU → EN) ----------------
+    # ---------------- панель ответа (перевод в обе стороны) ----------------
     reply = ttk.Frame(root)
     reply.pack(fill="x", padx=8, pady=(2, 0))
-    ttk.Label(reply, text="Ответ RU→EN:").pack(side="left")
+    ttk.Label(reply, text=tr("reply_label")).pack(side="left")
+    # компактные списки: коды языков, чтобы не раздувать панель.
+    # Источник по умолчанию = основной язык перевода; свой выбор сохраняется.
+    reply_src_var = tk.StringVar(
+        value=cfg.get("reply_src") or target_lang or "ru")
+    reply_dst_var = tk.StringVar(value=cfg.get("reply_dst") or "en")
+    reply_src = ttk.Combobox(reply, textvariable=reply_src_var, values=SUPPORTED_LANGS,
+                             state="readonly", width=4)
+    reply_src.pack(side="left", padx=(4, 0))
+    ttk.Label(reply, text="→").pack(side="left", padx=2)
+    reply_dst = ttk.Combobox(reply, textvariable=reply_dst_var, values=SUPPORTED_LANGS,
+                             state="readonly", width=4)
+    reply_dst.pack(side="left")
     reply_var = tk.StringVar()
-    reply_entry = ttk.Entry(reply, textvariable=reply_var, width=40)
-    reply_entry.pack(side="left", padx=(4, 8))
+    reply_entry = ttk.Entry(reply, textvariable=reply_var, width=32)
+    reply_entry.pack(side="left", padx=(8, 8))
     reply_out_var = tk.StringVar(value="")
     reply_out = ttk.Entry(reply, textvariable=reply_out_var, state="readonly",
                           foreground="#005a9e")
@@ -1468,14 +2207,39 @@ def run_gui():
 
     reply_state = {"after": None, "seq": 0}
 
+    def reply_langs():
+        src = reply_src_var.get() if reply_src_var.get() in SUPPORTED_LANGS \
+            else (target_lang or "ru")
+        dst = reply_dst_var.get() if reply_dst_var.get() in SUPPORTED_LANGS else "en"
+        return src, dst
+
+    def reply_save_langs(_evt=None):
+        src, dst = reply_langs()
+        if src != cfg.get("reply_src") or dst != cfg.get("reply_dst"):
+            cfg["reply_src"], cfg["reply_dst"] = src, dst
+            save_config(cfg)
+        # язык сменили — пересчитываем уже введённый текст
+        reply_on_change()
+
+    reply_src.bind("<<ComboboxSelected>>", reply_save_langs)
+    reply_dst.bind("<<ComboboxSelected>>", reply_save_langs)
+
     def reply_translate_async(text):
         """Перевод в фоне, результат — в GUI-поток."""
         seq = reply_state["seq"]
+        src, dst = reply_langs()
         try:
-            result, _lang = translate_auto(text, dst="en")
+            if src == dst:
+                result = text        # языки совпали — переводить нечего
+            else:
+                result, _lang = translate_auto(text, dst=dst, src=src)
             if result:
-                # игровые термины — принятыми английскими словами, а не дословно
-                result = glossary_fix(result, dst="en")
+                # игровые термины — принятыми словами, а не дословно;
+                # словарь знает только пару ru↔en
+                if dst == "en" and src == "ru":
+                    result = glossary_fix(result, dst="en")
+                elif dst == "ru":
+                    result = glossary_fix(result, dst="ru")
         except Exception:
             result = None
         root.after(0, lambda: reply_show_result(text, result, seq))
@@ -1484,13 +2248,13 @@ def run_gui():
         if seq != reply_state["seq"]:
             return          # устаревший запрос — текст уже изменился
         if result is None:
-            reply_out_var.set("(не удалось перевести)")
+            reply_out_var.set(tr("status_translate_fail"))
             return
         reply_out_var.set(result)
         try:
             root.clipboard_clear()
             root.clipboard_append(result)
-            status_var.set(f"Скопировано в буфер: {result[:60]}")
+            status_var.set(tr("status_copied", text=result[:60]))
         except Exception:
             pass
 
@@ -1513,16 +2277,19 @@ def run_gui():
     # ---------------- нижняя панель ----------------
     bottom = ttk.Frame(root)
     bottom.pack(fill="x", padx=8, pady=(2, 8))
-    status_var = tk.StringVar(value="Остановлено")
+    status_var = tk.StringVar(value=tr("status_stopped"))
     ttk.Label(bottom, textvariable=status_var).pack(side="left")
-    # номер версии — тихий уголок справа; рядом неприметная ссылка на словарь
+    # номер версии — тихий уголок справа; рядом неприметная ссылка на словарь.
+    # Словарь — механизм пост-обработки только для русского направления,
+    # поэтому ссылку показываем лишь когда перевод идёт на русский.
     ttk.Label(bottom, text=f"v{APP_VERSION}",
               foreground="#999999").pack(side="right", padx=(4, 0))
-    glossary_link = tk.Label(bottom, text="Словарь", fg="#7a9cc4",
-                             cursor="hand2", font=("Segoe UI", 8))
-    glossary_link.pack(side="right", padx=(4, 4))
-    glossary_link.bind("<Button-1>", lambda _e: open_glossary_editor(root))
-    run_btn = ttk.Button(bottom, text="▶ Старт")
+    if target_lang == "ru":
+        glossary_link = tk.Label(bottom, text=tr("glossary_link"), fg="#7a9cc4",
+                                 cursor="hand2", font=("Segoe UI", 8))
+        glossary_link.pack(side="right", padx=(4, 4))
+        glossary_link.bind("<Button-1>", lambda _e: open_glossary_editor(root))
+    run_btn = ttk.Button(bottom, text=tr("btn_start"))
     run_btn.pack(side="right", padx=4)
     def clear_all():
         for key in list(history):
@@ -1532,8 +2299,9 @@ def run_gui():
                 w.config(state="normal")
                 w.delete("1.0", "end")
                 w.config(state="disabled")
+                entry_starts[w] = []
 
-    clear_btn = ttk.Button(bottom, text="Очистить всё", command=clear_all)
+    clear_btn = ttk.Button(bottom, text=tr("btn_clear"), command=clear_all)
     clear_btn.pack(side="right")
 
     # ---------------- поиск по истории ----------------
@@ -1543,7 +2311,7 @@ def run_gui():
             return
         results = []
         for (ci, ch_name), entries in history.items():
-            for (t, name, original, translated) in entries:
+            for (t, name, original, translated, _src) in entries:
                 hay = " ".join(x for x in (name, original, translated) if x).lower()
                 if query in hay:
                     results.append((ci, ch_name, t, name, original, translated))
@@ -1551,7 +2319,7 @@ def run_gui():
 
     def show_search_results(query, results):
         win = tk.Toplevel(root)
-        win.title(f"Поиск: {query} — найдено: {len(results)}")
+        win.title(tr("search_title", query=query, n=len(results)))
         win.geometry("640x400")
         txt = scrolledtext.ScrolledText(win, wrap="word", state="disabled",
                                         font=("Segoe UI", 10))
@@ -1560,16 +2328,18 @@ def run_gui():
         txt.tag_config("name", font=("Segoe UI", 10, "bold"))
         txt.tag_config("ch", foreground="#0066ff")
         txt.tag_config("orig", foreground="#777777")
+        bind_copy(txt)
 
         def result_label(ci, ch_name):
             cls = cfg.get("clients") or []
             if len(cls) > 1 and ci < len(cls):
-                return f"{cls[ci].get('name') or 'Клиент ' + str(ci + 1)} · {ch_name}"
+                return (f"{cls[ci].get('name') or tr('client_default', n=ci + 1)}"
+                        f" · {ch_name}")
             return ch_name
 
         txt.config(state="normal")
         if not results:
-            txt.insert("end", "Ничего не найдено.\n")
+            txt.insert("end", tr("search_empty") + "\n")
         lines = []   # индекс строки -> (клиент, канал) для двойного клика
         for (ci, ch_name, t, name, original, translated) in results:
             txt.insert("end", f"[{result_label(ci, ch_name)}] ", "ch")
@@ -1611,14 +2381,14 @@ def run_gui():
                     switch_tab(ci, ch_name)
 
         txt.bind("<Double-Button-1>", on_double)
-        ttk.Label(win, text="Двойной клик по результату — перейти ко вкладке",
+        ttk.Label(win, text=tr("search_hint"),
                   foreground="#666666").pack(anchor="w", padx=6, pady=2)
 
     search_var = tk.StringVar()
     search_entry = ttk.Entry(bottom, textvariable=search_var, width=24)
     search_entry.pack(side="left", padx=(12, 2))
     search_entry.bind("<Return>", do_search)
-    ttk.Button(bottom, text="🔍 Найти", command=do_search).pack(side="left")
+    ttk.Button(bottom, text=tr("btn_search"), command=do_search).pack(side="left")
 
     # ---------------- логика ----------------
     def collect_cfg():
@@ -1636,7 +2406,10 @@ def run_gui():
 
     def render_entry(txt, entry):
         """Вставить одно сообщение в виджет с учётом текущих галочек."""
-        t, name, original, translated = entry
+        t, name, original, translated, _src = entry
+        # запоминаем строку, с которой начнётся запись — по ней ПКМ найдёт её
+        start_line = int(str(txt.index("end-1c")).split(".")[0])
+        entry_starts.setdefault(txt, []).append(start_line)
         if t:
             txt.insert("end", f"[{t}] ", "time")
         if name:
@@ -1645,7 +2418,7 @@ def run_gui():
             # перевода нет — оригинал показываем в любом случае
             txt.insert("end", original + "\n", "orig")
             if tr_var.get() and original:
-                txt.insert("end", "(не удалось перевести)\n", "err")
+                txt.insert("end", tr("msg_untranslated") + "\n", "err")
         elif translated == original:
             txt.insert("end", original + "\n")      # сообщение уже на русском
         elif orig_var.get():
@@ -1661,6 +2434,7 @@ def run_gui():
         txt, _ = clients_ui[client_idx]["tabs"][channel]
         txt.config(state="normal")
         txt.delete("1.0", "end")
+        entry_starts[txt] = []
         for entry in history.get((client_idx, channel), []):
             render_entry(txt, entry)
         txt.see("end")
@@ -1675,8 +2449,9 @@ def run_gui():
     # переключение «Оригинал» применяется и к уже выведенной истории
     orig_var.trace_add("write", lambda *_: refresh_view())
 
-    def append_to(client_idx, channel, time_s, name, original, translated):
-        entry = (time_s, name, original, translated)
+    def append_to(client_idx, channel, time_s, name, original, translated,
+                  src_lang=None):
+        entry = (time_s, name, original, translated, src_lang)
         key = (client_idx, channel)
         history.setdefault(key, []).append(entry)
         if len(history[key]) > HISTORY_MAX:
@@ -1702,13 +2477,12 @@ def run_gui():
         collect_cfg()
         clients = cfg.get("clients") or []
         if not clients:
-            status_var.set("Добавьте хотя бы одного клиента: кнопка «Клиенты…»")
+            status_var.set(tr("status_add_client"))
             return
         bad = next((c for c in clients
                     if not c.get("path") or not os.path.isdir(c["path"])), None)
         if bad is not None:
-            status_var.set(
-                f"Папка логов недоступна: {bad.get('path')!r} — проверьте в «Клиенты…»")
+            status_var.set(tr("status_bad_path", path=bad.get("path")))
             return
         stop_event.clear()
         state["raw"] = queue.Queue()
@@ -1723,23 +2497,24 @@ def run_gui():
             state["watchers"].append(w)
         state["worker"] = TranslateWorker(state["raw"], state["done"], stop_event,
                                           enabled=cfg["translate"],
-                                          target_lang=cfg.get("target_lang", "ru"))
+                                          target_lang=target_lang)
         state["worker"].start()
         state["running"] = True
-        run_btn.config(text="■ Стоп")
-        mode = "только новые сообщения (старые пропущены)"
+        run_btn.config(text=tr("btn_stop"))
+        mode = tr("status_mode_tail")
         state["count"] = 0
-        names = ", ".join(c.get("name") or f"Клиент {k + 1}"
+        names = ", ".join(c.get("name") or tr("client_default", n=k + 1)
                           for k, c in enumerate(clients))
-        status_var.set(f"Слежу за {len(clients)} клиентом(-ами): {names}. {mode}")
+        status_var.set(tr("status_watching", n=len(clients), names=names,
+                          mode=mode))
         log_debug(f"старт: клиенты={[(c.get('name'), c['path']) for c in clients]} "
-                  f"translate={cfg['translate']}")
+                  f"target={target_lang} translate={cfg['translate']}")
 
     def stop():
         stop_event.set()
         state["running"] = False
-        run_btn.config(text="▶ Старт")
-        status_var.set("Остановлено")
+        run_btn.config(text=tr("btn_start"))
+        status_var.set(tr("status_stopped"))
         log_debug("стоп")
 
     def toggle():
@@ -1759,14 +2534,14 @@ def run_gui():
                             client_idx=i, start_at_end=True)
             nw.start()
             state["watchers"][i] = nw
-            status_var.set("Наблюдатель перезапущен после сбоя (см. debug-лог)")
+            status_var.set(tr("watcher_restarted"))
         if state["worker"] is not None and not state["worker"].is_alive():
             log_debug("надзор: переводчик умер — перезапуск")
             state["worker"] = TranslateWorker(state["raw"], state["done"], stop_event,
                                               enabled=tr_var.get(),
-                                              target_lang=cfg.get("target_lang", "ru"))
+                                              target_lang=target_lang)
             state["worker"].start()
-            status_var.set("Переводчик перезапущен после сбоя (см. debug-лог)")
+            status_var.set(tr("worker_restarted"))
 
     def poll():
         try:
@@ -1783,8 +2558,8 @@ def run_gui():
             now = time.monotonic()
             if state.get("running") and now - state.get("status_at", 0) > 5:
                 state["status_at"] = now
-                status_var.set(f"Работает. Поймано сообщений: {state.get('count', 0)}. "
-                               f"{translator_status_text()}")
+                status_var.set(tr("status_running", n=state.get("count", 0),
+                                  backend=translator_status_text()))
             # команды из трея (потокобезопасно: только tk-виджеты)
             try:
                 while True:
@@ -1810,18 +2585,18 @@ def run_gui():
                     continue
                 if item[0] != "done":
                     continue
-                _, client_idx, channel, t, name, body, translated = item
-                append_to(client_idx, channel, t, name, body, translated)
+                _, client_idx, channel, t, name, body, translated, src_lang = item
+                append_to(client_idx, channel, t, name, body, translated, src_lang)
                 state["count"] = state.get("count", 0) + 1
-                status_var.set(f"Работает. Поймано сообщений: {state['count']}. "
-                               f"{translator_status_text()}")
+                status_var.set(tr("status_running", n=state["count"],
+                                  backend=translator_status_text()))
                 if snd_var.get():
                     play_sound(cfg.get("sound_file") or None)
                 if ntf_var.get():
                     cls = cfg.get("clients") or []
                     label = channel
                     if len(cls) > 1 and client_idx < len(cls):
-                        label = (f"{cls[client_idx].get('name') or 'Клиент ' + str(client_idx + 1)}"
+                        label = (f"{cls[client_idx].get('name') or tr('client_default', n=client_idx + 1)}"
                                  f" · {channel}")
                     show_notification(f"Wurm — {label}",
                                       (translated or body)[:180])
@@ -1829,7 +2604,7 @@ def run_gui():
             pass
         except Exception as exc:    # цикл опроса не должен умирать молча
             log_debug(f"poll: ошибка вывода: {exc!r}\n" + traceback.format_exc())
-            status_var.set(f"Ошибка вывода: {exc!r}")
+            status_var.set(tr("err_output", exc=repr(exc)))
         root.after(100, poll)
 
     tray_icon = [None]   # список, чтобы замыкание могло заменить значение
@@ -1856,11 +2631,11 @@ def run_gui():
     if HAVE_TRAY:
         try:
             menu = pystray.Menu(
-                pystray.MenuItem("Показать", lambda *_: tray_show(), default=True),
-                pystray.MenuItem("Выход", lambda *_: tray_quit()),
+                pystray.MenuItem(tr("tray_show"), lambda *_: tray_show(), default=True),
+                pystray.MenuItem(tr("tray_quit"), lambda *_: tray_quit()),
             )
             icon = pystray.Icon("WurmChatTranslator", make_tray_icon(),
-                                APP_TITLE, menu)
+                                tr("app_title"), menu)
             tray_icon[0] = icon
             threading.Thread(target=icon.run, daemon=True).start()
         except Exception as exc:
@@ -1883,10 +2658,8 @@ def run_gui():
         import tkinter.messagebox as mb
         newer = ".".join(str(x) for x in latest)
         if mb.askyesno(
-                APP_TITLE,
-                f"Доступна новая версия v{newer} (у вас v{APP_VERSION}).\n\n"
-                f"Открыть страницу загрузки?\n"
-                f"(Скачанный exe можно положить поверх старого — настройки сохранятся)",
+                tr("app_title"),
+                tr("update_msg", new=newer, cur=APP_VERSION),
                 icon="info"):
             try:
                 os.startfile(RELEASES_PAGE)
@@ -1903,15 +2676,15 @@ def run_gui():
         """
         import tkinter.messagebox as mb
         win = tk.Toplevel(root)
-        win.title("Клиенты — папки логов")
+        win.title(tr("dlg_clients_title"))
         win.geometry("640x340")
         win.transient(root)
         win.minsize(480, 260)
 
         tree = ttk.Treeview(win, columns=("name", "path"), show="headings",
                             height=10, selectmode="extended")
-        tree.heading("name", text="Имя")
-        tree.heading("path", text="Папка логов")
+        tree.heading("name", text=tr("col_name"))
+        tree.heading("path", text=tr("col_path"))
         tree.column("name", width=150, anchor="w")
         tree.column("path", width=440, anchor="w")
         tree.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1928,21 +2701,20 @@ def run_gui():
                 tree.delete(iid)
             for i, c in enumerate(cfg.get("clients") or []):
                 tree.insert("", "end", iid=str(i),
-                            values=(c.get("name") or f"Клиент {i + 1}",
+                            values=(c.get("name") or tr("client_default", n=i + 1),
                                     c.get("path", "")))
 
         def add_row(name="", path=""):
             iid = str(int(time.time() * 1000) % 10**8 + len(tree.get_children()))
             tree.insert("", "end", iid=iid,
-                        values=(name or f"Клиент {len(tree.get_children()) + 1}", path))
+                        values=(name or tr("client_default",
+                                            n=len(tree.get_children()) + 1), path))
 
         def find_all():
             """Автопоиск папок логов всех клиентов: Steam и сайт-клиент."""
             found = find_all_logs_dirs()
             if not found:
-                mb.showinfo(APP_TITLE,
-                            "Папки логов не найдены ни в Steam, "
-                            "ни в автономном клиенте.")
+                mb.showinfo(tr("app_title"), tr("find_none"))
                 return
             existing = {p.lower() for p in (row_values(i)[1]
                                             for i in tree.get_children())}
@@ -1953,30 +2725,30 @@ def run_gui():
                     existing.add(c["path"].lower())
                     added += 1
             if added == 0:
-                mb.showinfo(APP_TITLE, "Все найденные папки уже в списке.")
+                mb.showinfo(tr("app_title"), tr("find_all_present"))
 
         def add_manual():
-            d = filedialog.askdirectory(parent=win, title="Папка логов — …\\<Игрок>\\logs")
+            d = filedialog.askdirectory(parent=win, title=tr("add_dir_title"))
             if not d:
                 return
             name = os.path.basename(os.path.dirname(d)) or \
-                f"Клиент {len(tree.get_children()) + 1}"
+                tr("client_default", n=len(tree.get_children()) + 1)
             add_row(name, d)
 
         def remove_selected():
             for sel in tree.selection():
                 tree.delete(sel)
 
-        ttk.Button(btns, text="Найти всех", command=find_all).pack(side="left")
-        ttk.Button(btns, text="Добавить…", command=add_manual).pack(side="left", padx=4)
-        ttk.Button(btns, text="Удалить", command=remove_selected).pack(side="left")
+        ttk.Button(btns, text=tr("btn_find_all"), command=find_all).pack(side="left")
+        ttk.Button(btns, text=tr("btn_add"), command=add_manual).pack(side="left", padx=4)
+        ttk.Button(btns, text=tr("btn_remove"), command=remove_selected).pack(side="left")
         # «Закрыть» = применить изменения и закрыть (как и крестик окна)
-        ttk.Button(btns, text="Закрыть",
+        ttk.Button(btns, text=tr("btn_close"),
                    command=lambda: on_close_dialog()).pack(side="right")
 
         def apply_and_refresh():
             cfg["clients"] = [
-                {"name": row_values(iid)[0] or f"Клиент {k + 1}",
+                {"name": row_values(iid)[0] or tr("client_default", n=k + 1),
                  "path": row_values(iid)[1]}
                 for k, iid in enumerate(tree.get_children())]
             save_config(cfg)
@@ -1994,6 +2766,21 @@ def run_gui():
         win.protocol("WM_DELETE_WINDOW", on_close_dialog)
         refill()
 
+    def restart_gui():
+        """Полный перезапуск окна: смена языка интерфейса.
+
+        Потоки слежения останавливаются, окно пересоздаётся с новым языком;
+        настройки к этому моменту уже сохранены в конфиг."""
+        log_debug("перезапуск GUI (смена языка)")
+        stop_event.set()
+        try:
+            if tray_icon[0] is not None:
+                tray_icon[0].stop()
+        except Exception:
+            pass
+        root.destroy()
+        run_gui()
+
     root.protocol("WM_DELETE_WINDOW", on_close)
     clients_var.set(clients_summary())
     rebuild_clients_area()          # построить вкладки по списку клиентов
@@ -2009,6 +2796,13 @@ def run_gui():
 
 def self_test():
     ok = True
+    # консоль exe может быть в однобайтовой кодировке (cp1251) — не падаем
+    # на не-ASCII символах в выводе самотеста
+    try:
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+    except Exception:
+        pass
     for line, expected in [
         ("[19:13:45] <Uggabuga> guards!", ("19:13:45", "Uggabuga", "guards!")),
         ("[19:10:53] <Spirit templar> I'll take care of aged troll!",
@@ -2026,36 +2820,45 @@ def self_test():
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] parse: {line!r} -> {got}")
     try:
-        tr, lang = translate_auto("good evening friends")
-        good = lang == "en" and tr and "вечер" in tr.lower()
+        _tr, lang = translate_auto("good evening friends")
+        good = lang == "en" and _tr and "вечер" in _tr.lower()
         ok &= good
         backend = "mymemory" if GTX_LAST_ERROR == "429" else "gtx"
-        print(f"  [{'OK ' if good else 'FAIL'}] translate ({backend}): {tr!r} ({lang})")
+        print(f"  [{'OK ' if good else 'FAIL'}] translate ({backend}): {_tr!r} ({lang})")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] translate: {exc}")
     try:
-        got = translate_trade_body("WTS rare pickaxe, 5s")
+        # явный исходный язык (панель ответа: ru → en)
+        _tr2, lang2 = translate_auto("продам кедр и вемп за фавор", dst="en", src="ru")
+        good = bool(_tr2) and lang2 in ("ru", "auto")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] translate src=ru→en: {_tr2!r} ({lang2})")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] translate src=ru: {exc}")
+    try:
+        got, _gl = translate_trade_body("WTS rare pickaxe, 5s")
         good = got is not None and got.startswith("Продам")
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade WTS: {got!r}")
-        got = translate_trade_body("wtb: bulk cotton")
+        got, _gl = translate_trade_body("wtb: bulk cotton")
         good = got is not None and got.startswith("Куплю")
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade WTB: {got!r}")
-        got = translate_trade_body("PC on a rare hammer")
+        got, _gl = translate_trade_body("PC on a rare hammer")
         good = got is not None and got.startswith("Прайсчек")
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade PC: {got!r}")
-        got = translate_trade_body("(Cad) WTS wemp, cotton, barley")
+        got, _gl = translate_trade_body("(Cad) WTS wemp, cotton, barley")
         good = got is not None and got.startswith("(Cad) Продам")
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade серверный тег: {got!r}")
-        got = translate_trade_body("(Mel) wtb rare leather cap")
+        got, _gl = translate_trade_body("(Mel) wtb rare leather cap")
         good = got is not None and "(Mel) Куплю" in got
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade тег+регистр: {got!r}")
-        got = translate_trade_body("(Xan) WTT rare sword for axe")
+        got, _gl = translate_trade_body("(Xan) WTT rare sword for axe")
         good = got is not None and "(Xan) Обменяю" in got
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade WTT: {got!r}")
@@ -2100,6 +2903,37 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] словарь: {exc}")
+    # i18n: у всех языков полный набор ключей, названия — на родных языках
+    try:
+        ref = set(I18N["ru"])
+        for code, name in LANGUAGES:
+            if code == "auto":
+                continue
+            keys = set(I18N.get(code, {}))
+            missing = ref - keys
+            extra = keys - ref
+            good = not missing and not extra
+            ok &= good
+            print(f"  [{'OK ' if good else 'FAIL'}] i18n {code} ({name}): "
+                  f"ключей {len(keys)}/{len(ref)}"
+                  + (f", нет: {sorted(missing)}" if missing else "")
+                  + (f", лишние: {sorted(extra)}" if extra else ""))
+        for code, name in LANGUAGES[1:]:
+            global UI_LANG
+            UI_LANG = code
+            s = tr("btn_stop")
+            good = s and s != "btn_stop"
+            ok &= good
+        UI_LANG = "ru"
+        # автоопределение: auto → из Steam (или ru), явный код — без изменений
+        good = resolve_target_lang("pt") == "pt" and \
+            resolve_target_lang("auto") in SUPPORTED_LANGS
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] i18n resolve: "
+              f"auto→{resolve_target_lang('auto')}, pt→{resolve_target_lang('pt')}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] i18n: {exc}")
     print("Итог:", "все проверки пройдены" if ok else "есть ошибки")
     return 0 if ok else 1
 
@@ -2114,6 +2948,10 @@ def main():
     log_debug("=== запуск GUI ===")
 
     # Один экземпляр: если приложение уже работает — спросить, что делать.
+    # Язык этого диалога — по настройке/Steam, чтобы непонятная ситуация
+    # объяснялась на языке пользователя.
+    global UI_LANG
+    UI_LANG = resolve_ui_lang(load_config().get("target_lang"))
     mutex_handle, already = _single_instance_mutex()
     if already:
         log_debug("обнаружен уже запущенный экземпляр")
@@ -2123,11 +2961,8 @@ def main():
         ask.withdraw()
         ask.attributes("-topmost", True)
         choice = messagebox.askyesnocancel(
-            APP_TITLE,
-            "Приложение уже запущено.\n\n"
-            "Да — активировать уже запущенное\n"
-            "Нет — закрыть его и запустить новое\n"
-            "Отмена — ничего не делать")
+            tr("app_title"),
+            tr("instance_msg"))
         ask.destroy()
         if choice is None:          # Отмена
             log_debug("второй экземпляр: отмена пользователем")

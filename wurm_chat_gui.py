@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -332,6 +332,13 @@ CHANNELS = [
     ("CA Help", "CA_HELP", False),
     ("PM", "PM__", True),
 ]
+
+# Языковые каналы вида «Russian GL» — чаты на конкретном языке. По умолчанию
+# не переводятся вообще (ни текст, ни валюта): опция translate_lang_channels.
+RE_LANG_CHANNEL = re.compile(
+    r"^(?:russian|english|german|french|spanish|portuguese|chinese|polish|"
+    r"italian|dutch|turkish|japanese|korean|swedish|norwegian|danish|"
+    r"finnish|czech|hungarian|romanian|ukrainian)\s+GL$", re.IGNORECASE)
 
 GTX_URL = "https://translate.googleapis.com/translate_a/single"
 GTX_TIMEOUT = 6
@@ -982,6 +989,82 @@ def glossary_save_items(items):
     _glossary_cache.update(mtime=None, entries=None)
 
 
+# --------------------------------------------------------------------------- #
+# Игровая валюта: 1g = 100s = 10000c = 1000000i (золото/серебро/медь/железо)
+# --------------------------------------------------------------------------- #
+# Суммы вроде «20s» или «2g 50s 30c 40i» машинный перевод коверкает, поэтому
+# до перевода они прячутся в токены <CurN> (механизм защиты имён), а после —
+# подставляются словами на целевом языке.
+CURRENCY_WORDS = {
+    # единица: {язык: (именит. ед., родит. ед.)} — для ru две формы,
+    # для остальных языков склонения нет
+    "g": {"ru": ("золото", "золота"), "en": ("gold",), "de": ("Gold",),
+          "es": ("oro",), "fr": ("or",), "pt": ("ouro",), "zh": ("金",)},
+    "s": {"ru": ("серебро", "серебра"), "en": ("silver",), "de": ("Silber",),
+          "es": ("plata",), "fr": ("argent",), "pt": ("prata",), "zh": ("银",)},
+    "c": {"ru": ("медь", "меди"), "en": ("copper",), "de": ("Kupfer",),
+          "es": ("cobre",), "fr": ("cuivre",), "pt": ("cobre",), "zh": ("铜",)},
+    "i": {"ru": ("железо", "железа"), "en": ("iron",), "de": ("Eisen",),
+          "es": ("hierro",), "fr": ("fer",), "pt": ("ferro",), "zh": ("铁",)},
+}
+
+RE_CURRENCY = re.compile(r"(?<![\w])(\d+)\s*([gsci])(?![\w])", re.IGNORECASE)
+
+
+def currency_protect(text):
+    """'WTS sword 2g 50s' -> ('WTS sword <Cur0> <Cur1>', [('2','g'),('50','s')])."""
+    amounts = []
+
+    def rep(m):
+        amounts.append((m.group(1), m.group(2).lower()))
+        return f"<Cur{len(amounts) - 1}>"
+
+    return RE_CURRENCY.sub(rep, text), amounts
+
+
+def currency_restore(text, amounts, dst):
+    """Токены <CurN> -> '20 серебра' (ru), '20 silver' (en) и т.д.
+
+    Соседние суммы разделяет запятой («2g 50s» -> «2 золота, 50 серебра»),
+    перед токеном/после него восстанавливает пробел, если переводчик его «съел»
+    (Google склеивает «меч <Cur0>» в «меч<Cur0>»)."""
+    if not text or not amounts:
+        return text
+
+    def word_for(num, unit):
+        if dst is None:                    # опция выключена — «20s» как есть
+            return unit
+        forms = CURRENCY_WORDS.get(unit, {}).get(dst) or CURRENCY_WORDS[unit]["en"]
+        if dst == "ru" and len(forms) > 1:
+            # 1 серебро, но 20 серебра («11 серебра» — тоже родительный)
+            n = int(num) % 100
+            return forms[0] if n % 10 == 1 and n != 11 else forms[1]
+        return forms[0]
+
+    def replace(m, num, word, raw):
+        full = m.string
+        before = full[m.start() - 1] if m.start() > 0 else " "
+        after = full[m.end()] if m.end() < len(full) else " "
+        out = f"{num}{word}" if raw else f"{num} {word}"
+        if before.isalnum() or before in ">)]»":
+            out = " " + out
+        if after.isalnum() or after in "<([«":
+            out += " "
+        return out
+
+    # сначала схлопываем разделители между соседними сумками в запятую
+    for i in range(1, len(amounts)):
+        text = re.sub(rf"<Cur{i - 1}>\s*<Cur{i}>",
+                      f"<Cur{i - 1}>, <Cur{i}>", text)
+    raw_mode = dst is None
+    for i, (num, unit) in enumerate(amounts):
+        text = re.sub(rf"<Cur{i}>",
+                      lambda m, n=num, u=unit: replace(m, n, word_for(n, u),
+                                                       raw_mode),
+                      text, count=1)
+    return text
+
+
 def open_glossary_editor(parent):
     """Ненавязчивый редактор словаря: правка прямо в ячейке двойным щелчком,
     каждое изменение сразу пишется в wurm_glossary.json и действует без
@@ -1177,13 +1260,14 @@ class TranslateWorker(threading.Thread):
     оригинал, перевод|None). Переводит только тело сообщения, имя — нет."""
 
     def __init__(self, raw_queue, done_queue, stop_event, enabled=True,
-                 target_lang="ru"):
+                 target_lang="ru", options=None):
         super().__init__(daemon=True)
         self.raw = raw_queue
         self.done = done_queue
         self.stop = stop_event
         self.enabled = enabled
         self.target_lang = target_lang
+        self.options = options if options is not None else {}
         self.cache = {}
         self._last_req = 0.0
 
@@ -1218,31 +1302,53 @@ class TranslateWorker(threading.Thread):
 
         translated = None
         src_lang = None
-        if self.enabled and body:
+        cur_amounts = []
+        opts = self.options
+        # языковые каналы («Russian GL») — по умолчанию вообще без перевода
+        lang_channel = bool(RE_LANG_CHANNEL.match(channel or ""))
+        keep_as_is = lang_channel and not opts.get("translate_lang_channels", False)
+        use_currency = bool(opts.get("translate_currency", True))
+        if self.enabled and body and not keep_as_is:
             trade_prefixed = channel == "Trade" and bool(RE_TRADE_PREFIX.match(body))
             if (self.target_lang == "ru" and re.search(r"[А-Яа-яЁё]", body)
                     and not trade_prefixed):
                 translated = body  # уже на русском — перевод не нужен
                 src_lang = "ru"
             elif body in self.cache:
-                translated, src_lang = self.cache[body]
+                translated, src_lang = self.cache[body]   # в кэше — уже финальный вид
             else:
                 pause = TRANSLATE_INTERVAL - (time.monotonic() - self._last_req)
                 if pause > 0:
                     time.sleep(pause)
+                # валюта прячется в токены до перевода, вернётся после
+                # (даже при выключенной опции — чтобы «20s» дошло до экрана
+                # в исходном виде, а не перекошенным машинным переводом)
+                body_t, cur_amounts = currency_protect(body)
                 if trade_prefixed:
-                    translated, src_lang = translate_trade_body(body, self.target_lang)
+                    translated, src_lang = translate_trade_body(body_t,
+                                                                self.target_lang)
                 else:
                     translated, src_lang = translate_preserving_names(
-                        body, self.target_lang)
+                        body_t, self.target_lang)
                 self._last_req = time.monotonic()
                 if translated is not None:
                     # Пост-обработка словарём до кэша: кэш хранит финальный вид.
                     if self.target_lang == "ru":
                         translated = glossary_fix(translated, "ru")
+                    translated = currency_restore(
+                        translated, cur_amounts,
+                        self.target_lang if use_currency else None)
                     self.cache[body] = (translated, src_lang)
                     if len(self.cache) > TRANSLATE_CACHE_MAX:
                         self.cache.pop(next(iter(self.cache)))
+        elif keep_as_is:
+            translated = body   # языковой канал с выключенным переводом — как есть
+        # сообщение «уже на русском»: валюта всё равно оформляется словами
+        if (translated is not None and cur_amounts
+                and body not in self.cache):
+            translated = currency_restore(translated, cur_amounts,
+                                          self.target_lang if use_currency
+                                          else None)
 
         self.done.put(("done", client_idx, channel, t, name, body, translated,
                        src_lang))
@@ -1263,6 +1369,9 @@ DEFAULTS = {
     "target_lang": "auto",   # auto → определить по языку клиента Steam
     "reply_src": "",         # "" → как основной язык перевода; иначе явный код
     "reply_dst": "en",       # панель ответа: на какой язык переводить
+    "translate_lang_channels": False,  # переводить языковые чаты («Russian GL»)
+    "translate_currency": True,        # «20s» → «20 серебра»; выкл — как есть
+    "auto_copy_reply": True,           # перевод ответа — сразу в буфер обмена
 }
 
 
@@ -1352,6 +1461,13 @@ I18N = {
         "app_title": "Wurm Chat — переводчик",
         "clients_label": "Клиенты:",
         "clients_btn": "Клиенты…",
+        "btn_settings": "Настройки…",
+        "settings_title": "Настройки перевода",
+        "opt_lang_channels": "Переводить языковые чаты (Russian GL, English GL, …)",
+        "opt_currency": "Переводить денежные единицы (20s → 20 серебра)",
+        "opt_auto_copy": "Автоматически копировать перевод ответа в буфер обмена",
+        "settings_hint": "Изменения применяются сразу, перезапуск не нужен.",
+        "settings_close": "Закрыть",
         "clients_none": "не заданы",
         "lang_label": "Язык:",
         "chk_translate": "Перевод на {lang}",
@@ -1427,6 +1543,13 @@ I18N = {
         "app_title": "Wurm Chat Translator",
         "clients_label": "Clients:",
         "clients_btn": "Clients…",
+        "btn_settings": "Settings…",
+        "settings_title": "Translation settings",
+        "opt_lang_channels": "Translate language channels (Russian GL, English GL, …)",
+        "opt_auto_copy": "Automatically copy the reply translation to the clipboard",
+        "opt_currency": "Translate currency units (20s → 20 silver)",
+        "settings_hint": "Changes apply immediately, no restart needed.",
+        "settings_close": "Close",
         "clients_none": "not set",
         "lang_label": "Language:",
         "chk_translate": "Translate to {lang}",
@@ -1502,6 +1625,13 @@ I18N = {
         "app_title": "Wurm Chat — Tradutor",
         "clients_label": "Clientes:",
         "clients_btn": "Clientes…",
+        "btn_settings": "Configurações…",
+        "settings_title": "Configurações de tradução",
+        "opt_auto_copy": "Copiar automaticamente a tradução da resposta para a área de transferência",
+        "opt_lang_channels": "Traduzir chats de idiomas (Russian GL, English GL, …)",
+        "opt_currency": "Traduzir unidades monetárias (20s → 20 prata)",
+        "settings_hint": "As alterações são aplicadas imediatamente, sem reiniciar.",
+        "settings_close": "Fechar",
         "clients_none": "não definidos",
         "lang_label": "Idioma:",
         "chk_translate": "Traduzir para {lang}",
@@ -1579,6 +1709,13 @@ I18N = {
         "app_title": "Wurm Chat — Übersetzer",
         "clients_label": "Clients:",
         "clients_btn": "Clients…",
+        "btn_settings": "Einstellungen…",
+        "opt_auto_copy": "Übersetzte Antwort automatisch in die Zwischenablage kopieren",
+        "settings_title": "Übersetzungseinstellungen",
+        "opt_lang_channels": "Sprach-Chats übersetzen (Russian GL, English GL, …)",
+        "opt_currency": "Währungseinheiten übersetzen (20s → 20 Silber)",
+        "settings_hint": "Änderungen werden sofort übernommen, Neustart nicht erforderlich.",
+        "settings_close": "Schließen",
         "clients_none": "nicht gesetzt",
         "lang_label": "Sprache:",
         "chk_translate": "Übersetzen auf {lang}",
@@ -1658,6 +1795,13 @@ I18N = {
         "app_title": "Wurm Chat — Traductor",
         "clients_label": "Clientes:",
         "clients_btn": "Clientes…",
+        "opt_auto_copy": "Copiar automáticamente la traducción de la respuesta al portapapeles",
+        "btn_settings": "Ajustes…",
+        "settings_title": "Ajustes de traducción",
+        "opt_lang_channels": "Traducir chats de idiomas (Russian GL, English GL, …)",
+        "opt_currency": "Traducir unidades monetarias (20s → 20 plata)",
+        "settings_hint": "Los cambios se aplican inmediatamente, sin reiniciar.",
+        "settings_close": "Cerrar",
         "clients_none": "sin definir",
         "lang_label": "Idioma:",
         "chk_translate": "Traducir a {lang}",
@@ -1734,7 +1878,14 @@ I18N = {
     "fr": {
         "app_title": "Wurm Chat — Traducteur",
         "clients_label": "Clients :",
+        "opt_auto_copy": "Copier automatiquement la traduction de la réponse dans le presse-papiers",
         "clients_btn": "Clients…",
+        "btn_settings": "Paramètres…",
+        "settings_title": "Paramètres de traduction",
+        "opt_lang_channels": "Traduire les canaux de langue (Russian GL, English GL, …)",
+        "opt_currency": "Traduire les unités monétaires (20s → 20 argent)",
+        "settings_hint": "Les changements s'appliquent immédiatement, sans redémarrage.",
+        "settings_close": "Fermer",
         "clients_none": "non définis",
         "lang_label": "Langue :",
         "chk_translate": "Traduire en {lang}",
@@ -1812,8 +1963,15 @@ I18N = {
     },
     "zh": {
         "app_title": "Wurm 聊天翻译器",
+        "opt_auto_copy": "自动将回复翻译复制到剪贴板",
         "clients_label": "客户端：",
         "clients_btn": "客户端…",
+        "btn_settings": "设置…",
+        "settings_title": "翻译设置",
+        "opt_lang_channels": "翻译语言频道（Russian GL、English GL 等）",
+        "opt_currency": "翻译货币单位（20s → 20 银）",
+        "settings_hint": "更改立即生效，无需重启。",
+        "settings_close": "关闭",
         "clients_none": "未设置",
         "lang_label": "语言：",
         "chk_translate": "翻译为{lang}",
@@ -1946,6 +2104,13 @@ def run_gui():
     root.geometry("760x560")
     root.minsize(560, 380)
 
+    # Ошибки обработчиков Tk (клики и т.п.) по умолчанию уходят в stderr —
+    # в оконном приложении это «никуда». Пишем их в журнал отладки.
+    def _tk_error(exc_type, exc, tb):
+        log_debug(f"ОШИБКА ОБРАБОТЧИКА Tk: {exc_type.__name__}: {exc}\n"
+                  + "".join(traceback.format_tb(tb)))
+    root.report_callback_exception = _tk_error
+
     stop_event = threading.Event()
     state = {"running": False, "watchers": [], "worker": None,
              "raw": queue.Queue(), "done": queue.Queue()}
@@ -1968,6 +2133,8 @@ def run_gui():
         side="left", padx=6)
     ttk.Button(top, text=tr("clients_btn"),
                command=lambda: open_clients_dialog()).pack(side="left")
+    ttk.Button(top, text=tr("btn_settings"),
+               command=lambda: open_settings_dialog()).pack(side="left", padx=(6, 0))
     ttk.Label(top, text=tr("lang_label")).pack(side="left", padx=(14, 2))
     # Названия языков — на родных языках: случайно выбравший китайский
     # всегда найдёт «Русский» / «English» в этом списке обратно
@@ -1985,6 +2152,9 @@ def run_gui():
         if code == (cfg.get("target_lang") or "auto"):
             return
         cfg["target_lang"] = code
+        # источник панели ответа следует за основным языком: сбрасываем
+        # сохранённый выбор — после перезапуска встанет новый язык
+        cfg["reply_src"] = ""
         save_config(cfg)
         restart_gui()
 
@@ -2251,6 +2421,8 @@ def run_gui():
             reply_out_var.set(tr("status_translate_fail"))
             return
         reply_out_var.set(result)
+        if not cfg.get("auto_copy_reply", True):
+            return          # опция выключена — перевод только на экране
         try:
             root.clipboard_clear()
             root.clipboard_append(result)
@@ -2399,6 +2571,9 @@ def run_gui():
             "notify": ntf_var.get(),
             "show_original": orig_var.get(),
             "on_top": top_var.get(),
+            "translate_lang_channels": bool(cfg.get("translate_lang_channels")),
+            "translate_currency": bool(cfg.get("translate_currency", True)),
+            "auto_copy_reply": bool(cfg.get("auto_copy_reply", True)),
         })
         save_config(cfg)
 
@@ -2497,7 +2672,7 @@ def run_gui():
             state["watchers"].append(w)
         state["worker"] = TranslateWorker(state["raw"], state["done"], stop_event,
                                           enabled=cfg["translate"],
-                                          target_lang=target_lang)
+                                          target_lang=target_lang, options=cfg)
         state["worker"].start()
         state["running"] = True
         run_btn.config(text=tr("btn_stop"))
@@ -2539,7 +2714,8 @@ def run_gui():
             log_debug("надзор: переводчик умер — перезапуск")
             state["worker"] = TranslateWorker(state["raw"], state["done"], stop_event,
                                               enabled=tr_var.get(),
-                                              target_lang=target_lang)
+                                              target_lang=target_lang,
+                                              options=cfg)
             state["worker"].start()
             status_var.set(tr("worker_restarted"))
 
@@ -2665,6 +2841,49 @@ def run_gui():
                 os.startfile(RELEASES_PAGE)
             except Exception as exc:
                 log_debug(f"не удалось открыть страницу релизов: {exc!r}")
+
+    # ---------------- диалог настроек перевода ----------------
+    def open_settings_dialog():
+        """Переключатели дополнительных опций перевода. Применяются сразу:
+        переводчик читает флаги из cfg на каждое сообщение."""
+        win = tk.Toplevel(root)
+        win.title(tr("settings_title"))
+        win.transient(root)
+        win.resizable(False, False)
+
+        box = ttk.Frame(win, padding=12)
+        box.pack(fill="both", expand=True)
+
+        lang_var = tk.BooleanVar(value=bool(cfg.get("translate_lang_channels")))
+        cur_var = tk.BooleanVar(value=bool(cfg.get("translate_currency", True)))
+        copy_var = tk.BooleanVar(value=bool(cfg.get("auto_copy_reply", True)))
+
+        def apply(*_args):
+            cfg["translate_lang_channels"] = bool(lang_var.get())
+            cfg["translate_currency"] = bool(cur_var.get())
+            cfg["auto_copy_reply"] = bool(copy_var.get())
+            save_config(cfg)
+
+        ttk.Checkbutton(box, text=tr("opt_lang_channels"),
+                        variable=lang_var, command=apply).pack(anchor="w",
+                                                               pady=2)
+        ttk.Checkbutton(box, text=tr("opt_currency"),
+                        variable=cur_var, command=apply).pack(anchor="w",
+                                                              pady=2)
+        ttk.Checkbutton(box, text=tr("opt_auto_copy"),
+                        variable=copy_var, command=apply).pack(anchor="w",
+                                                               pady=2)
+        ttk.Label(box, text=tr("settings_hint"),
+                  foreground="#777777", wraplength=380).pack(anchor="w",
+                                                             pady=(10, 0))
+        ttk.Button(box, text=tr("settings_close"),
+                   command=win.destroy).pack(anchor="e", pady=(10, 0))
+
+        # модальность: ввод заблокирован для главного окна, пока открыто
+        win.update_idletasks()
+        win.grab_set()
+        win.focus_set()
+        root.wait_window(win)
 
     # ---------------- диалог списка клиентов ----------------
     def open_clients_dialog():
@@ -2903,6 +3122,48 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] словарь: {exc}")
+    # валюта: защита токенами и восстановление словами на целевом языке
+    try:
+        cases = [
+            ("WTS rare sword 20s", "ru", "20 серебра"),
+            ("WTS rare sword 20s", "en", "20 silver"),
+            ("price 2g 50s 30c 40i", "ru", "2 золота, 50 серебра, 30 меди, 40 железа"),
+            ("price 2g 50s 30c 40i", "de", "2 Gold, 50 Silber, 30 Kupfer, 40 Eisen"),
+            ("1g", "ru", "1 золото"),
+            ("11s", "ru", "11 серебра"),
+            ("21i", "ru", "21 железо"),
+            ("20 seconds", "ru", "20 seconds"),   # «20s» внутри слова не трогаем
+        ]
+        for phrase, lang, want in cases:
+            prot, amounts = currency_protect(phrase)
+            got = currency_restore(prot, amounts, lang)
+            good = want in got
+            ok &= good
+            print(f"  [{'OK ' if good else 'FAIL'}] валюта {lang}: {phrase!r} -> {got!r}")
+        # сквозная проверка через живой перевод: токен выдерживает Google
+        prot, amounts = currency_protect("WTS rare sword 20s")
+        _live, _l = translate_preserving_names(prot, "ru")
+        got = currency_restore(_live, amounts, "ru") if _live else None
+        good = bool(got) and "20 серебра" in got
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] валюта (live gtx): {got!r}")
+        # опция «как есть»: токен возвращается в исходном виде
+        prot, amounts = currency_protect("price 2g 50s 30c 40i")
+        got = currency_restore(prot, amounts, None)
+        good = "2g, 50s, 30c, 40i" in got
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] валюта как есть: {got!r}")
+        # языковые каналы: детектор «… GL» по названию языка
+        good = (bool(RE_LANG_CHANNEL.match("Russian GL"))
+                and bool(RE_LANG_CHANNEL.match("english gl"))
+                and not RE_LANG_CHANNEL.match("GL-Freedom")
+                and not RE_LANG_CHANNEL.match("Local"))
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] языковые каналы: Russian GL / "
+              "english gl — да; GL-Freedom / Local — нет")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] валюта: {exc}")
     # i18n: у всех языков полный набор ключей, названия — на родных языках
     try:
         ref = set(I18N["ru"])

@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -660,6 +660,42 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
                 pass
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Сигналы: реакция на появление подстроки в канале (звук, уведомление,
+# красная подсветка вкладки)
+# --------------------------------------------------------------------------- #
+ALERT_THROTTLE_SECONDS = 10.0   # антиспам: правило не чаще раза в N секунд
+_alert_last_fired = {}          # (channel, pattern) -> time.monotonic()
+
+
+def match_alert_rules(rules, channel, original, translated):
+    """Правила сигналов, сработавшие на сообщении.
+
+    Канал правила пустой/«любой» — совпадает с любым каналом. Подстрока ищется
+    в оригинале и в переводе, без учёта регистра. Срабатывание антиспамится:
+    одно правило — не чаще раза в ALERT_THROTTLE_SECONDS."""
+    fired = []
+    haystacks = [(original or "").lower(), (translated or "").lower()]
+    now = time.monotonic()
+    for rule in rules or []:
+        if not isinstance(rule, dict) or not rule.get("enabled", True):
+            continue
+        ch = str(rule.get("channel", "") or "").strip()
+        if ch and ch != "*" and ch != channel:
+            continue
+        pattern = str(rule.get("pattern", "") or "").strip()
+        if not pattern:
+            continue
+        if not any(pattern.lower() in h for h in haystacks):
+            continue
+        key = (ch, pattern.lower())
+        if now - _alert_last_fired.get(key, 0.0) < ALERT_THROTTLE_SECONDS:
+            continue
+        _alert_last_fired[key] = now
+        fired.append(rule)
+    return fired
 
 
 # --------------------------------------------------------------------------- #
@@ -1556,7 +1592,16 @@ DEFAULTS = {
     "translate_lang_channels": False,  # переводить языковые чаты («Russian GL»)
     "translate_currency": True,        # «20s» → «20 серебра»; выкл — как есть
     "auto_copy_reply": True,           # перевод ответа — сразу в буфер обмена
+    "alerts": [],                      # сигналы: channel/pattern/enabled/...
 }
+# Сигнал по умолчанию: фраза археологии «можно копать центр бывшего дида»
+# приходит в канал Event — реагируем всеми способами. У уже существующих
+# установок список добавится один раз: как только alerts впервые окажется в
+# файле конфигурации, дальше списком управляет пользователь.
+DEFAULTS["alerts"] = [{
+    "channel": "Event",
+    "pattern": "complete the location details",
+    "enabled": True, "sound": True, "notify": True}]
 
 
 def load_config():
@@ -1646,6 +1691,29 @@ I18N = {
         "clients_label": "Клиенты:",
         "clients_btn": "Клиенты…",
         "btn_settings": "Настройки…",
+        "alerts_btn": "Сигналы…",
+        "alerts_title": "Сигналы на сообщения",
+        "alerts_col_on": "Вкл",
+        "alerts_col_channel": "Канал",
+        "alerts_col_pattern": "Подстрока",
+        "alerts_col_sound": "Звук",
+        "alerts_col_notify": "Уведомл.",
+        "alert_any": "Любой",
+        "alerts_channel": "Канал:",
+        "alerts_pattern": "Подстрока:",
+        "alerts_on": "Вкл",
+        "alert_sound": "Звук",
+        "alert_notify": "Уведомление",
+        "alerts_add": "Новый",
+        "alerts_save_rule": "Сохранить",
+        "alerts_remove": "Удалить",
+        "alerts_hint": "Срабатывает при появлении подстроки в канале "
+                       "(проверяются оригинал и перевод, без учёта регистра). "
+                       "Вкладка подсвечивается красным; одно правило не "
+                       "срабатывает чаще раза в 10 секунд. Щелчок по ✓/— или "
+                       "по каналу меняет значение, двойной щелчок по подстроке "
+                       "— правка.",
+        "alert_toast_title": "Сигнал",
         "settings_title": "Настройки перевода",
         "opt_lang_channels": "Переводить языковые чаты (Russian GL, English GL, …)",
         "opt_currency": "Переводить денежные единицы (20s → 20 серебра)",
@@ -1726,6 +1794,28 @@ I18N = {
         "clients_label": "Clients:",
         "clients_btn": "Clients…",
         "btn_settings": "Settings…",
+        "alerts_btn": "Alerts…",
+        "alerts_title": "Message alerts",
+        "alerts_col_on": "On",
+        "alerts_col_channel": "Channel",
+        "alerts_col_pattern": "Substring",
+        "alerts_col_sound": "Sound",
+        "alerts_col_notify": "Notify",
+        "alert_any": "Any",
+        "alerts_channel": "Channel:",
+        "alerts_pattern": "Substring:",
+        "alerts_on": "On",
+        "alert_sound": "Sound",
+        "alert_notify": "Notification",
+        "alerts_add": "New",
+        "alerts_save_rule": "Save",
+        "alerts_remove": "Delete",
+        "alerts_hint": "Fires when the substring appears in the channel "
+                       "(original and translation are checked, "
+                       "case-insensitive). The tab turns red; one rule fires "
+                       "at most once per 10 seconds. Click ✓/— or the channel "
+                       "to change them; double-click the substring to edit.",
+        "alert_toast_title": "Alert",
         "settings_title": "Translation settings",
         "opt_lang_channels": "Translate language channels (Russian GL, English GL, …)",
         "opt_auto_copy": "Automatically copy the reply translation to the clipboard",
@@ -1806,6 +1896,28 @@ I18N = {
         "clients_label": "Clientes:",
         "clients_btn": "Clientes…",
         "btn_settings": "Configurações…",
+        "alerts_btn": "Alertas…",
+        "alerts_title": "Alertas de mensagens",
+        "alerts_col_on": "Ativo",
+        "alerts_col_channel": "Canal",
+        "alerts_col_pattern": "Subcadeia",
+        "alerts_col_sound": "Som",
+        "alerts_col_notify": "Notif.",
+        "alert_any": "Qualquer",
+        "alerts_channel": "Canal:",
+        "alerts_pattern": "Subcadeia:",
+        "alerts_on": "Ativo",
+        "alert_sound": "Som",
+        "alert_notify": "Notificação",
+        "alerts_add": "Novo",
+        "alerts_save_rule": "Guardar",
+        "alerts_remove": "Remover",
+        "alerts_hint": "Dispara quando a subcadeia aparece no canal (original "
+                       "e tradução, sem distinção de maiúsculas). A aba fica "
+                       "vermelha; uma regra dispara no máximo uma vez por "
+                       "10 segundos. Clique em ✓/— ou no canal para alterar; "
+                       "duplo clique na subcadeia para editar.",
+        "alert_toast_title": "Alerta",
         "settings_title": "Configurações de tradução",
         "opt_auto_copy": "Copiar automaticamente a tradução da resposta para a área de transferência",
         "opt_lang_channels": "Traduzir chats de idiomas (Russian GL, English GL, …)",
@@ -1888,6 +2000,29 @@ I18N = {
         "clients_label": "Clients:",
         "clients_btn": "Clients…",
         "btn_settings": "Einstellungen…",
+        "alerts_btn": "Signale…",
+        "alerts_title": "Nachrichtensignale",
+        "alerts_col_on": "An",
+        "alerts_col_channel": "Kanal",
+        "alerts_col_pattern": "Teilstring",
+        "alerts_col_sound": "Ton",
+        "alerts_col_notify": "Benachr.",
+        "alert_any": "Jeder",
+        "alerts_channel": "Kanal:",
+        "alerts_pattern": "Teilstring:",
+        "alerts_on": "An",
+        "alert_sound": "Ton",
+        "alert_notify": "Benachrichtigung",
+        "alerts_add": "Neu",
+        "alerts_save_rule": "Speichern",
+        "alerts_remove": "Entfernen",
+        "alerts_hint": "Löst aus, wenn der Teilstring im Kanal erscheint "
+                       "(Original und Übersetzung werden geprüft, "
+                       "Groß-/Kleinschreibung egal). Der Reiter wird rot; "
+                       "eine Regel löst höchstens einmal pro 10 Sekunden aus. "
+                       "Klick auf ✓/— oder den Kanal ändert den Wert, "
+                       "Doppelklick auf den Teilstring bearbeitet ihn.",
+        "alert_toast_title": "Signal",
         "opt_auto_copy": "Übersetzte Antwort automatisch in die Zwischenablage kopieren",
         "settings_title": "Übersetzungseinstellungen",
         "opt_lang_channels": "Sprach-Chats übersetzen (Russian GL, English GL, …)",
@@ -1973,6 +2108,29 @@ I18N = {
         "clients_btn": "Clientes…",
         "opt_auto_copy": "Copiar automáticamente la traducción de la respuesta al portapapeles",
         "btn_settings": "Ajustes…",
+        "alerts_btn": "Alertas…",
+        "alerts_title": "Alertas de mensajes",
+        "alerts_col_on": "Activo",
+        "alerts_col_channel": "Canal",
+        "alerts_col_pattern": "Subcadena",
+        "alerts_col_sound": "Sonido",
+        "alerts_col_notify": "Notif.",
+        "alert_any": "Cualquiera",
+        "alerts_channel": "Canal:",
+        "alerts_pattern": "Subcadena:",
+        "alerts_on": "Activo",
+        "alert_sound": "Sonido",
+        "alert_notify": "Notificación",
+        "alerts_add": "Nuevo",
+        "alerts_save_rule": "Guardar",
+        "alerts_remove": "Eliminar",
+        "alerts_hint": "Se activa cuando la subcadena aparece en el canal (se "
+                       "comprueban el original y la traducción, sin distinguir "
+                       "mayúsculas). La pestaña se pone roja; una regla se "
+                       "activa como máximo una vez cada 10 segundos. Clic en "
+                       "✓/— o en el canal para cambiar; doble clic en la "
+                       "subcadena para editar.",
+        "alert_toast_title": "Alerta",
         "settings_title": "Ajustes de traducción",
         "opt_lang_channels": "Traducir chats de idiomas (Russian GL, English GL, …)",
         "opt_currency": "Traducir unidades monetarias (20s → 20 plata)",
@@ -2055,6 +2213,29 @@ I18N = {
         "opt_auto_copy": "Copier automatiquement la traduction de la réponse dans le presse-papiers",
         "clients_btn": "Clients…",
         "btn_settings": "Paramètres…",
+        "alerts_btn": "Alertes…",
+        "alerts_title": "Alertes de messages",
+        "alerts_col_on": "Actif",
+        "alerts_col_channel": "Canal",
+        "alerts_col_pattern": "Sous-chaîne",
+        "alerts_col_sound": "Son",
+        "alerts_col_notify": "Notif.",
+        "alert_any": "Tous",
+        "alerts_channel": "Canal :",
+        "alerts_pattern": "Sous-chaîne :",
+        "alerts_on": "Actif",
+        "alert_sound": "Son",
+        "alert_notify": "Notification",
+        "alerts_add": "Nouveau",
+        "alerts_save_rule": "Enregistrer",
+        "alerts_remove": "Supprimer",
+        "alerts_hint": "Se déclenche quand la sous-chaîne apparaît dans le "
+                       "canal (original et traduction vérifiés, sans "
+                       "distinction de casse). L'onglet devient rouge ; une "
+                       "règle se déclenche au plus une fois par 10 secondes. "
+                       "Cliquez sur ✓/— ou sur le canal pour les modifier, "
+                       "double-cliquez sur la sous-chaîne pour l'éditer.",
+        "alert_toast_title": "Alerte",
         "settings_title": "Paramètres de traduction",
         "opt_lang_channels": "Traduire les canaux de langue (Russian GL, English GL, …)",
         "opt_currency": "Traduire les unités monétaires (20s → 20 argent)",
@@ -2139,6 +2320,26 @@ I18N = {
         "clients_label": "客户端：",
         "clients_btn": "客户端…",
         "btn_settings": "设置…",
+        "alerts_btn": "提醒…",
+        "alerts_title": "消息提醒",
+        "alerts_col_on": "启用",
+        "alerts_col_channel": "频道",
+        "alerts_col_pattern": "子串",
+        "alerts_col_sound": "声音",
+        "alerts_col_notify": "通知",
+        "alert_any": "任意",
+        "alerts_channel": "频道：",
+        "alerts_pattern": "子串：",
+        "alerts_on": "启用",
+        "alert_sound": "声音",
+        "alert_notify": "通知",
+        "alerts_add": "新建",
+        "alerts_save_rule": "保存",
+        "alerts_remove": "删除",
+        "alerts_hint": "当子串出现在频道中时触发（检查原文和译文，不区分"
+                       "大小写）。标签页变红；同一规则每 10 秒最多触发一次。"
+                       "单击 ✓/— 或频道可切换，双击子串进行编辑。",
+        "alert_toast_title": "提醒",
         "settings_title": "翻译设置",
         "opt_lang_channels": "翻译语言频道（Russian GL、English GL 等）",
         "opt_currency": "翻译货币单位（20s → 20 银）",
@@ -2305,6 +2506,8 @@ def run_gui():
                command=lambda: open_clients_dialog()).pack(side="left")
     ttk.Button(top, text=tr("btn_settings"),
                command=lambda: open_settings_dialog()).pack(side="left", padx=(6, 0))
+    ttk.Button(top, text=tr("alerts_btn"),
+               command=lambda: open_alerts_dialog()).pack(side="left", padx=(6, 0))
     ttk.Label(top, text=tr("lang_label")).pack(side="left", padx=(14, 2))
     # Названия языков — на родных языках: случайно выбравший китайский
     # всегда найдёт «Русский» / «English» в этом списке обратно
@@ -2359,6 +2562,7 @@ def run_gui():
     # в ярко-синий цвет «непрочитано».
     TAB_FG = "#404040"          # обычный цвет заголовка вкладки
     TAB_FG_UNREAD = "#0066ff"   # ярко-синий — новые сообщения
+    TAB_FG_ALERT = "#cc0000"    # красный — сработал сигнал (важнее синего)
     TAB_BG_ACTIVE = "#cfe3f5"   # фон активной вкладки
 
     clients_holder = tk.Frame(root)
@@ -2367,6 +2571,7 @@ def run_gui():
     clients_ui = []            # по индексу клиента: его вкладки и окна каналов
     current_client = {"idx": 0}
     history = {}               # (индекс клиента, канал) -> список сообщений
+    alerted = {"tabs": set(), "clients": set()}   # подсвеченные красным сигналом
     entry_starts = {}          # виджет чата -> номера строк, с которых начинаются
                                # записи history (в том же порядке) — для ПКМ
 
@@ -2418,7 +2623,8 @@ def run_gui():
     def switch_client(idx):
         current_client["idx"] = idx
         clients_ui[idx]["frame"].lift()
-        # открыли вкладку клиента — признак «непрочитано» снимается
+        # открыли вкладку клиента — признак «непрочитано» и сигнал сняты
+        alerted["clients"].discard(idx)
         if clients_ui[idx]["btn"] is not None:
             clients_ui[idx]["btn"].config(fg=TAB_FG)
         for i, ui in enumerate(clients_ui):
@@ -2435,10 +2641,12 @@ def run_gui():
         ui["current"]["name"] = name
         _, frame = ui["tabs"][name]
         frame.lift()
+        # открыли вкладку — «непрочитано» и красная подсветка сигнала сняты
+        alerted["tabs"].discard((client_idx, name))
         for n, b in ui["tab_buttons"].items():
             if n == name:
                 b.config(bg=TAB_BG_ACTIVE, relief="sunken")
-                b.config(fg=TAB_FG)   # открыли вкладку — «непрочитано» снято
+                b.config(fg=TAB_FG)
             else:
                 b.config(bg=root.cget("bg"), relief="flat")
 
@@ -2950,14 +3158,38 @@ def run_gui():
                 txt.see("end")
             txt.config(state="disabled")
         # неактивная вкладка с новым сообщением — ярко-синий заголовок
+        # (красный сигнал важнее: его синим не перебиваем)
         if client_idx >= len(clients_ui):
             return
         ui = clients_ui[client_idx]
         if (client_idx != current_client["idx"]
                 or channel != active_channel(client_idx)):
-            ui["tab_buttons"][channel].config(fg=TAB_FG_UNREAD)
+            if (client_idx, channel) not in alerted["tabs"]:
+                ui["tab_buttons"][channel].config(fg=TAB_FG_UNREAD)
         if ui["btn"] is not None and client_idx != current_client["idx"]:
-            ui["btn"].config(fg=TAB_FG_UNREAD)
+            if client_idx not in alerted["clients"]:
+                ui["btn"].config(fg=TAB_FG_UNREAD)
+        # сигналы: правила на подстроку в канале (звук, уведомление, красный)
+        fired = match_alert_rules(cfg.get("alerts"), channel, original,
+                                  translated)
+        if fired:
+            if (client_idx != current_client["idx"]
+                    or channel != active_channel(client_idx)):
+                alerted["tabs"].add((client_idx, channel))
+                ui["tab_buttons"][channel].config(fg=TAB_FG_ALERT)
+                if ui["btn"] is not None:
+                    alerted["clients"].add(client_idx)
+                    ui["btn"].config(fg=TAB_FG_ALERT)
+            if any(r.get("sound") for r in fired):
+                play_sound(cfg.get("sound_file") or None)
+            if any(r.get("notify") for r in fired):
+                cls = cfg.get("clients") or []
+                label = channel
+                if len(cls) > 1 and client_idx < len(cls):
+                    label = (f"{cls[client_idx].get('name') or tr('client_default', n=client_idx + 1)}"
+                             f" · {channel}")
+                show_notification(f"{tr('alert_toast_title')} — {label}",
+                                  (translated or original)[:180])
 
     def start():
         collect_cfg()
@@ -3296,6 +3528,212 @@ def run_gui():
         win.protocol("WM_DELETE_WINDOW", on_close_dialog)
         refill()
 
+    # ---------------- диалог сигналов ----------------
+    def open_alerts_dialog():
+        """Правила реакции на подстроку в канале: звук, уведомление, красная
+        вкладка. Проверяются оригинал и перевод сообщения, без учёта регистра.
+        «Закрыть» = сохранить в конфиг."""
+        win = tk.Toplevel(root)
+        win.title(tr("alerts_title"))
+        win.geometry("640x340")
+        win.transient(root)
+        win.minsize(540, 300)
+
+        rules = [dict(r) for r in (cfg.get("alerts") or [])
+                 if isinstance(r, dict)]
+
+        table_frame = ttk.Frame(win)
+        table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        tree = ttk.Treeview(table_frame,
+                            columns=("on", "channel", "pattern", "sound",
+                                     "notify"),
+                            show="headings", height=8, selectmode="browse")
+        tree.heading("on", text=tr("alerts_col_on"))
+        tree.heading("channel", text=tr("alerts_col_channel"))
+        tree.heading("pattern", text=tr("alerts_col_pattern"))
+        tree.heading("sound", text=tr("alerts_col_sound"))
+        tree.heading("notify", text=tr("alerts_col_notify"))
+        tree.column("on", width=40, anchor="center")
+        tree.column("channel", width=110, anchor="w")
+        tree.column("pattern", width=250, anchor="w")
+        tree.column("sound", width=60, anchor="center")
+        tree.column("notify", width=80, anchor="center")
+        scroll = ttk.Scrollbar(table_frame, orient="vertical",
+                               command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        mark = lambda b: "✓" if b else "—"   # noqa: E731
+        ch_names = [name for name, _, _ in CHANNELS]
+        BOOL_COLS = {"on": "enabled", "sound": "sound", "notify": "notify"}
+
+        def autosave():
+            cfg["alerts"] = rules
+            save_config(cfg)
+
+        def refill():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for i, r in enumerate(rules):
+                tree.insert("", "end", iid=str(i), values=(
+                    mark(bool(r.get("enabled", True))),
+                    r.get("channel") or tr("alert_any"),
+                    r.get("pattern", ""),
+                    mark(bool(r.get("sound"))),
+                    mark(bool(r.get("notify")))))
+
+        # -------- щелчок: переключить флажок или сменить канал --------
+        def on_click(event):
+            iid = tree.identify_row(event.y)
+            col_id = tree.identify_column(event.x)
+            if not iid or not col_id:
+                return
+            i = int(iid)
+            if i >= len(rules):
+                return
+            col = tree["columns"][int(col_id[1:]) - 1]
+            r = rules[i]
+            if col in BOOL_COLS:
+                key = BOOL_COLS[col]
+                r[key] = not bool(r.get(key))
+            elif col == "channel":
+                seq = [""] + ch_names
+                cur = r.get("channel") or ""
+                r["channel"] = seq[(seq.index(cur) + 1) % len(seq)] \
+                    if cur in seq else ""
+            else:
+                return
+            refill()
+            tree.selection_set(str(i))
+            autosave()
+
+        tree.bind("<Button-1>", on_click)
+
+        # -------- правка подстроки прямо в ячейке --------
+        edit_state = {"widget": None, "iid": None}
+
+        def commit_edit(_e=None):
+            wdg = edit_state["widget"]
+            if wdg is None:
+                return
+            value = wdg.get().strip()
+            iid = edit_state["iid"]
+            edit_state["widget"] = None
+            edit_state["iid"] = None
+            # уничтожать виджет изнутри его же события нельзя — через idle
+            win.after_idle(wdg.destroy)
+            if iid is None:
+                return
+            i = int(iid)
+            if i >= len(rules):
+                return
+            if value:
+                rules[i]["pattern"] = value
+                refill()
+                tree.selection_set(iid)
+            else:                    # пустая подстрока — удалить правило
+                del rules[i]
+                refill()
+            autosave()
+
+        def cancel_edit(_e=None):
+            wdg = edit_state["widget"]
+            edit_state["widget"] = None
+            edit_state["iid"] = None
+            if wdg is not None:
+                win.after_idle(wdg.destroy)
+
+        def open_cell_editor(iid):
+            """Открыть поле ввода поверх ячейки «Подстрока»."""
+            bbox = tree.bbox(iid, "pattern")
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            entry = ttk.Entry(table_frame)
+            # bbox относительно tree — пересчитываем в координаты рамки
+            entry.place(x=x + tree.winfo_x(), y=y + tree.winfo_y(),
+                        width=w, height=h)
+            entry.insert(0, rules[int(iid)].get("pattern", ""))
+            entry.select_range(0, "end")
+            edit_state.update(widget=entry, iid=iid)
+            entry.bind("<Return>", commit_edit)
+            entry.bind("<FocusOut>", on_focus_out)
+            entry.bind("<Escape>", cancel_edit)
+            # фокус через after_idle: при вызове из кнопки Tk иначе
+            # возвращает фокус самой кнопке после завершения команды
+            win.after_idle(entry.focus_set)
+
+        def on_focus_out(_e=None):
+            """Коммит при уходе фокуса — но не в момент фокусного танца
+            Windows (сразу после focus_set фокус может вернуться)."""
+            def check():
+                wdg = edit_state["widget"]
+                if wdg is None:
+                    return
+                try:
+                    cur = str(win.tk.call("focus", "-displayof", win._w))
+                except tk.TclError:
+                    return
+                if cur == wdg._w or cur.startswith(wdg._w + "."):
+                    return          # фокус внутри поля — не коммитим
+                commit_edit()
+            win.after_idle(check)
+
+        def start_edit(event):
+            if edit_state["widget"] is not None:
+                commit_edit()
+            iid = tree.identify_row(event.y)
+            col_id = tree.identify_column(event.x)
+            if not iid or not col_id:
+                return
+            if tree["columns"][int(col_id[1:]) - 1] != "pattern":
+                return
+            open_cell_editor(iid)
+
+        tree.bind("<Double-Button-1>", start_edit)
+
+        def add_rule():
+            if edit_state["widget"] is not None:
+                commit_edit()
+            rules.append({"channel": "", "pattern": "",
+                          "enabled": True, "sound": True, "notify": False})
+            refill()
+            iid = str(len(rules) - 1)
+            tree.see(iid)
+            tree.selection_set(iid)
+            open_cell_editor(iid)      # сразу вводим подстроку
+
+        def remove_rule():
+            if edit_state["widget"] is not None:
+                cancel_edit()
+            for sel in sorted((int(s) for s in tree.selection()), reverse=True):
+                if 0 <= sel < len(rules):
+                    del rules[sel]
+            refill()
+            autosave()
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=8, pady=(4, 8))
+        ttk.Button(btns, text=tr("alerts_add"),
+                   command=add_rule).pack(side="left")
+        ttk.Button(btns, text=tr("alerts_remove"),
+                   command=remove_rule).pack(side="left", padx=4)
+        ttk.Button(btns, text=tr("btn_close"),
+                   command=lambda: on_close()).pack(side="right")
+
+        ttk.Label(win, text=tr("alerts_hint"), foreground="#777777",
+                  wraplength=600).pack(anchor="w", padx=8, pady=(0, 4))
+
+        def on_close():
+            if edit_state["widget"] is not None:
+                commit_edit()
+            autosave()
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        refill()
+
     def restart_gui():
         """Полный перезапуск окна: смена языка интерфейса.
 
@@ -3416,6 +3854,54 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] проверка фразы: {exc}")
+    # сигналы: матчинг подстроки по каналу, оригиналу и переводу, антиспам
+    try:
+        _rules = [
+            {"channel": "Local", "pattern": "Complete the Location Details",
+             "enabled": True, "sound": True, "notify": True},
+            {"channel": "", "pattern": "wtb", "enabled": True},
+            {"channel": "Trade", "pattern": "выключено", "enabled": False},
+        ]
+        _alert_last_fired.clear()
+        fired = match_alert_rules(_rules, "Local", "You complete the location details.", None)
+        good = len(fired) == 1
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: подстрока в оригинале "
+              f"(регистр игнор.): {len(fired)}")
+        fired = match_alert_rules(_rules, "Local", "x", "WTB rare sword")
+        good = len(fired) == 1          # по переводу, канал «Любой»
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: по переводу, любой канал: {len(fired)}")
+        fired = match_alert_rules(_rules, "Village", "wtb", None)
+        good = not fired                # «wtb» действует на любой, Village ≠ Local…
+        fired2 = match_alert_rules(_rules, "Village", "complete the location", None)
+        good = good and not fired2      # …а правило Local — только для Local
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: фильтр по каналу")
+        fired = match_alert_rules(_rules, "Trade", "выключено правило", None)
+        good = not fired
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: выключенное правило")
+        _alert_last_fired.clear()
+        fired = match_alert_rules(_rules, "Local", "complete the location details", None)
+        fired_again = match_alert_rules(_rules, "Local", "complete the location details", None)
+        good = len(fired) == 1 and not fired_again   # антиспам
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: антиспам (не чаще раза "
+              f"в {ALERT_THROTTLE_SECONDS:.0f} с)")
+        good = (len(DEFAULTS["alerts"]) == 1
+                and DEFAULTS["alerts"][0].get("channel") == "Event"
+                and DEFAULTS["alerts"][0].get("pattern")
+                    == "complete the location details"
+                and DEFAULTS["alerts"][0].get("enabled")
+                and DEFAULTS["alerts"][0].get("sound")
+                and DEFAULTS["alerts"][0].get("notify"))
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: дефолтный сигнал "
+              f"археологии (Event): {len(DEFAULTS['alerts'])}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] сигналы: {exc}")
     persona = steam_persona_name()
     auto = auto_logs_dir()
     good = os.path.isdir(auto)

@@ -2898,16 +2898,28 @@ def run_gui():
             txt.insert("end", translated + "\n")    # только перевод
             txt.insert("end", "\n")
 
+    def tab_visible(client_idx, channel):
+        return (client_idx == current_client["idx"]
+                and channel == active_channel(client_idx))
+
     def rebuild_channel(client_idx, channel):
         if client_idx >= len(clients_ui):
             return
         txt, _ = clients_ui[client_idx]["tabs"][channel]
+        # читающего в середине истории новое/перерисованное сообщение не
+        # должно «выбрасывать» вниз: позиция сохраняется, если он прокручен
+        # вверх; скрытые вкладки всегда остаются приколотыми к последнему
+        top = txt.index("@0,0")              # первая видимая строка
+        at_end = float(txt.yview()[1]) > 0.99
         txt.config(state="normal")
         txt.delete("1.0", "end")
         entry_starts[txt] = []
         for entry in history.get((client_idx, channel), []):
             render_entry(txt, entry)
-        txt.see("end")
+        if at_end or not tab_visible(client_idx, channel):
+            txt.see("end")
+        else:
+            txt.see(top)
         txt.config(state="disabled")
 
     def refresh_view():
@@ -2929,9 +2941,13 @@ def run_gui():
             rebuild_channel(client_idx, channel)   # удалили хвост — перерисовали
         elif client_idx < len(clients_ui):
             txt, _ = clients_ui[client_idx]["tabs"][channel]
+            # автопрокрутка только если пользователь уже внизу; если он
+            # прокручен вверх и читает старое — позицию не трогаем
+            at_end = float(txt.yview()[1]) > 0.99
             txt.config(state="normal")
             render_entry(txt, entry)
-            txt.see("end")
+            if at_end or not tab_visible(client_idx, channel):
+                txt.see("end")
             txt.config(state="disabled")
         # неактивная вкладка с новым сообщением — ярко-синий заголовок
         if client_idx >= len(clients_ui):

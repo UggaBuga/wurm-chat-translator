@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -330,6 +330,7 @@ CHANNELS = [
     ("GL-Freedom", "GL-Freedom", False),
     ("Russian GL", "Russian_GL", False),
     ("CA Help", "CA_HELP", False),
+    ("Event", "_Event", False),
     ("PM", "PM__", True),
 ]
 
@@ -759,8 +760,18 @@ class LogWatcher(threading.Thread):
 # Жаргон торгового чата: префиксы переводим жёстко, остаток — через переводчик
 # --------------------------------------------------------------------------- #
 
-TRADE_PREFIXES = {"WTS": "Продам", "WTB": "Куплю", "PC": "Прайсчек",
-                  "WTT": "Обменяю"}
+# Фиксированные переводы префиксов — по языкам перевода. Для языков вне
+# таблицы префикс остаётся в оригинале (английский жаргон понятен всем).
+TRADE_PREFIXES = {
+    "ru": {"WTS": "Продам", "WTB": "Куплю", "PC": "Прайсчек",
+           "WTT": "Обменяю"},
+    "pt": {"WTS": "Vendo", "WTB": "Compro", "PC": "PC", "WTT": "Troco"},
+    "de": {"WTS": "Verkaufe", "WTB": "Kaufe", "PC": "PC", "WTT": "Tausche"},
+    "es": {"WTS": "Vendo", "WTB": "Compro", "PC": "PC", "WTT": "Cambio"},
+    "fr": {"WTS": "Je vends", "WTB": "J'achète", "PC": "PC",
+           "WTT": "J'échange"},
+    "zh": {"WTS": "出售", "WTB": "求购", "PC": "询价", "WTT": "交换"},
+}
 # Реальный формат: «(Cad) WTS …» — серверный тег в скобках перед префиксом,
 # префикс может быть в любом регистре («wts», «Wtb»).
 RE_TRADE_PREFIX = re.compile(r"^(?:\(([A-Za-z]{2,10})\)\s*)?(WTS|WTB|WTT|PC)\b[:\s-]*",
@@ -777,7 +788,7 @@ def translate_trade_body(body, dst="ru"):
     prefix = m.group(2).upper()
     server = m.group(1)          # серверный тег «(Cad)», может отсутствовать
     rest = body[m.end():]
-    head = TRADE_PREFIXES[prefix]
+    head = TRADE_PREFIXES.get(dst, {}).get(prefix, prefix)
     if server:
         head = f"({server}) {head}"
     if not rest.strip():
@@ -860,6 +871,7 @@ DEFAULT_GLOSSARY = [
     {"en": "cotton", "ru": "хлопок"},
     {"en": "barley", "ru": "ячмень"},
     {"en": "wheat", "ru": "пшеница"},
+    {"en": "nails", "ru": "гвозди"},
     # --- Вера и магия ---
     {"en": "favour", "ru": "фавор", "fix": ["благосклонность"]},
     {"en": "favor", "ru": "фавор"},
@@ -877,6 +889,76 @@ DEFAULT_GLOSSARY = [
     {"en": "wtb", "ru": "Куплю"},
     {"en": "wtt", "ru": "Обменяю"},
     {"en": "pc", "ru": "Прайсчек"},
+    # --- Чатовые сокращения ---
+    {"en": "tyvm", "ru": "большое спасибо"},
+    {"en": "ty", "ru": "спасибо"},
+    {"en": "thx", "ru": "спасибо"},
+    {"en": "np", "ru": "не за что"},
+    {"en": "nvm", "ru": "неважно"},
+    {"en": "btw", "ru": "кстати"},
+    {"en": "brb", "ru": "сейчас вернусь"},
+    {"en": "bbl", "ru": "вернусь позже"},
+    {"en": "afk", "ru": "отошёл"},
+    {"en": "wb", "ru": "с возвращением"},
+    {"en": "pls", "ru": "пожалуйста"},
+    {"en": "plz", "ru": "пожалуйста"},
+    {"en": "imo", "ru": "по-моему"},
+    {"en": "imho", "ru": "по-моему"},
+    {"en": "idk", "ru": "не знаю"},
+    {"en": "iirc", "ru": "если не ошибаюсь"},
+    {"en": "irl", "ru": "в реальной жизни"},
+    {"en": "atm", "ru": "сейчас"},
+    {"en": "asap", "ru": "как можно скорее"},
+    {"en": "gf", "ru": "хороший бой"},
+    {"en": "noob", "ru": "нуб"},
+    {"en": "pm", "ru": "в личку"},
+    {"en": "ea", "ru": "за штуку"},
+    {"en": "each", "ru": "за штуку"},
+    # --- Торговые термины ---
+    {"en": "wta", "ru": "аукцион"},
+    {"en": "bo", "ru": "выкуп"},
+    {"en": "neg", "ru": "торг"},
+    {"en": "obo", "ru": "или лучшее предложение"},
+    {"en": "cod", "ru": "наложка"},
+    {"en": "pickup", "ru": "самовывоз"},
+    {"en": "pick up", "ru": "самовывоз"},
+    {"en": "bulk", "ru": "опт"},
+    # --- Игровые термины ---
+    {"en": "guards", "ru": "стража", "fix": ["охрана"]},
+    {"en": "dmg", "ru": "урон"},
+    {"en": "sb", "ru": "бонус сна"},
+    {"en": "sp", "ru": "порошок сна"},
+    {"en": "fs", "ru": "боевой навык"},
+    {"en": "priest", "ru": "жрец", "fix": ["священник"]},
+    {"en": "dirt", "ru": "земля", "fix": ["грязь"]},
+    {"en": "wagon", "ru": "фургон", "fix": ["вагон"]},
+    {"en": "large cart", "ru": "большая телега"},
+    {"en": "larder", "ru": "лардер"},
+    {"en": "bsb", "ru": "большой контейнер"},
+    {"en": "fsb", "ru": "контейнер для еды"},
+    {"en": "ccfp", "ru": "кцфп"},
+    {"en": "affinity", "ru": "аффинити",
+     "fix": ["склонность", "сродство", "близость"]},
+    {"en": "unique", "ru": "уник"},
+    {"en": "hota", "ru": "ХОТА"},
+    {"en": "drake", "ru": "дрейк"},
+    {"en": "moonmetal", "ru": "лунный металл"},
+    {"en": "glim", "ru": "глим"},
+    # --- Зачарования (энчанты) ---
+    {"en": "coc", "ru": "круг хитрости"},
+    {"en": "woa", "ru": "ветер эпох"},
+    {"en": "botd", "ru": "благословение тьмы"},
+    {"en": "lt", "ru": "передача жизни"},
+    {"en": "ms", "ru": "вор разума"},
+    {"en": "fb", "ru": "воспламенение"},
+    {"en": "fa", "ru": "метка льда"},
+    {"en": "aosp", "ru": "аура разделённой боли"},
+    {"en": "web armor", "ru": "паутинная броня"},
+    # --- Боги ---
+    {"en": "vynora", "ru": "Винора"},
+    {"en": "magranon", "ru": "Магранон"},
+    {"en": "libila", "ru": "Либила"},
+    {"en": "fo", "ru": "Фо"},
 ]
 
 
@@ -969,6 +1051,80 @@ def glossary_fix(text, dst="ru"):
     return text
 
 
+# Термины, которые не прячем до перевода: их английская форма слишком
+# неоднозначна (pm — ещё и «post meridiem»), поэтому для них работает только
+# пост-замена оставшихся английских слов. Остальные термины словаря
+# защищаются до перевода — см. glossary_protect/glossary_restore.
+GLOSSARY_NO_PROTECT = {"pm"}
+
+_glossary_sorted = {"entries": None}
+
+
+def _glossary_sorted_entries():
+    """Записи словаря, отсортированные по длине en (длинные — первыми:
+    «guard tower» должен матчиться раньше, чем «guard»)."""
+    entries = glossary_entries()
+    if _glossary_sorted["entries"] is not None:
+        return _glossary_sorted["entries"]
+    ordered = sorted(entries, key=lambda e: -len(e[0]))
+    _glossary_sorted["entries"] = ordered
+    return ordered
+
+
+def glossary_protect(text, dst="ru"):
+    """Прячет известные en-термины в токены ДО перевода.
+
+    Google иначе переводил термины наугад («nails» -> «ногти»), и пост-замена
+    уже не могла ничего исправить — английского слова в тексте не оставалось.
+    Возвращает (текст, [(токен, ru), ...]) — restore вернёт термины после
+    перевода. Работает только для ru: словарь en<->ru.
+    """
+    terms = []
+    if dst != "ru" or not text:
+        return text, terms
+    n = 0
+    for en, en_re, ru, _f, _r, _fe in _glossary_sorted_entries():
+        if en.lower() in GLOSSARY_NO_PROTECT:
+            continue
+        if en_re.search(text):
+            token = f"<Gl{n}>"
+            text = en_re.sub(token, text)
+            terms.append((token, ru))
+        n += 1
+    return text, terms
+
+
+def glossary_restore(text, terms):
+    """Возвращает на место токены glossary_protect (термины в финальном виде).
+
+    Машинный перевод иногда съедает пробелы вокруг токена и склеивает слова
+    («изумруд<Gl57>»), поэтому при подстановке проверяем соседей: если термин
+    оказался вплотную к букве, цифре или скобке — добавляем пробел.
+    """
+    if not text or not terms:
+        return text
+
+    def _make_repl(ru):
+        def repl(m):
+            s = m.string
+            start, end = m.span()
+            pre = s[start - 1] if start > 0 else " "
+            post = s[end] if end < len(s) else " "
+            res = ru
+            if (pre.isalnum() or pre in ")]}") and ru[0].isalnum():
+                res = " " + res
+            if post.isalnum() or post in "([{":
+                res = res + " "
+            return res
+        return repl
+
+    for token, ru in terms:
+        # регистр токена машинный перевод иногда меняет — ищем нечувствительно
+        text = re.sub(re.escape(token), _make_repl(ru), text,
+                      flags=re.IGNORECASE)
+    return text
+
+
 def glossary_raw_items():
     """Сырой список записей словаря (dict'ы) из файла или встроенный."""
     try:
@@ -987,6 +1143,7 @@ def glossary_save_items(items):
     with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
     _glossary_cache.update(mtime=None, entries=None)
+    _glossary_sorted["entries"] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1324,6 +1481,9 @@ class TranslateWorker(threading.Thread):
                 # (даже при выключенной опции — чтобы «20s» дошло до экрана
                 # в исходном виде, а не перекошенным машинным переводом)
                 body_t, cur_amounts = currency_protect(body)
+                # термины словаря тоже прячем до перевода, чтобы Google
+                # не переводил их наугад («nails» -> «ногти»)
+                body_t, gl_terms = glossary_protect(body_t, self.target_lang)
                 if trade_prefixed:
                     translated, src_lang = translate_trade_body(body_t,
                                                                 self.target_lang)
@@ -1338,6 +1498,7 @@ class TranslateWorker(threading.Thread):
                     translated = currency_restore(
                         translated, cur_amounts,
                         self.target_lang if use_currency else None)
+                    translated = glossary_restore(translated, gl_terms)
                     self.cache[body] = (translated, src_lang)
                     if len(self.cache) > TRANSLATE_CACHE_MAX:
                         self.cache.pop(next(iter(self.cache)))
@@ -2268,6 +2429,119 @@ def run_gui():
     def active_channel(client_idx):
         return clients_ui[client_idx]["current"]["name"]
 
+    # ---------------- копирование/вставка Ctrl-C / Ctrl-V ----------------
+    # У read-only Text (state="disabled") фокуса нет — собственные биндинги
+    # Ctrl-C не срабатывают. Поэтому запоминаем, в каком текстовом поле
+    # последний раз выделяли текст мышью, и глобально ловим Ctrl-C: если в
+    # том поле есть выделение — копируем его; если нет — копируется выделение
+    # поля ввода под фокусом. Реальные Ctrl+C/Ctrl+V на Windows Tk приходят
+    # с keysym «??» и char «\x03»/«\x16», поэтому нативные привязки
+    # <Control-c>/<Control-v> не срабатывают — ловим по символу.
+    last_sel_text = {"w": None}
+
+    def _track_selection(event):
+        w = event.widget
+        if isinstance(w, tk.Text):
+            last_sel_text["w"] = w if w.tag_ranges("sel") else None
+        elif w is not root and hasattr(w, "selection_present"):
+            # клик по полю ввода — его выделение важнее чатового
+            last_sel_text["w"] = None
+        return None
+
+    def _focused_entry(event):
+        """Виджет под фокусом, если это редактируемое поле ввода."""
+        fw = getattr(event, "widget", None)
+        if fw is None:
+            return None
+        try:
+            if str(fw.cget("state")) != "normal":
+                return None          # disabled/readonly — не трогаем
+        except tk.TclError:
+            return None
+        if isinstance(fw, (tk.Entry, ttk.Entry)):
+            return fw
+        return None
+
+    def _global_ctrl_c(event):
+        fw = getattr(event, "widget", None)
+        # поле ввода с собственным выделением — копируем из него
+        if fw is not None and hasattr(fw, "selection_present"):
+            try:
+                if fw.selection_present():
+                    sel = fw.selection_get()
+                    fw.clipboard_clear()
+                    fw.clipboard_append(sel)
+                    return "break"
+            except tk.TclError:
+                pass
+        # иначе — выделение в чате, где выделяли в последний раз мышью
+        w = last_sel_text["w"]
+        try:
+            if (w is None or not w.winfo_exists()
+                    or not w.tag_ranges("sel")):
+                return None          # выделения в чатах нет — не мешаем
+        except tk.TclError:          # виджет уже уничтожен
+            last_sel_text["w"] = None
+            return None
+        sel = w.get("sel.first", "sel.last")
+        w.clipboard_clear()
+        w.clipboard_append(sel)
+        return "break"
+
+    def _global_ctrl_v(event):
+        ent = _focused_entry(event)
+        if ent is None:
+            return None              # фокус не в редактируемом поле
+        try:
+            clip = ent.clipboard_get()
+        except tk.TclError:
+            return None              # буфер пуст или недоступен
+        if not clip:
+            return None
+        try:
+            if ent.selection_present():   # вставка поверх выделения
+                first = ent.index("sel.first")
+                ent.delete("sel.first", "sel.last")
+                ent.icursor(first)        # курсор — на место выделения
+        except tk.TclError:
+            pass
+        ent.insert("insert", clip)
+        return "break"
+
+    def _global_ctrl_x(event):
+        ent = _focused_entry(event)
+        if ent is None:
+            return None
+        try:
+            if not ent.selection_present():
+                return None
+            sel = ent.selection_get()
+            ent.clipboard_clear()
+            ent.clipboard_append(sel)
+            ent.delete("sel.first", "sel.last")
+            return "break"
+        except tk.TclError:
+            return None
+
+    def _on_any_key(event):
+        # Реальные Ctrl+C/V/X на Windows Tk приходят как KeyPress с keysym
+        # «??» и char «\x03»/«\x16»/«\x18» — шаблоны <Control-…> их не ловят.
+        if event.char == "\x03":
+            return _global_ctrl_c(event)
+        if event.char == "\x16":
+            return _global_ctrl_v(event)
+        if event.char == "\x18":
+            return _global_ctrl_x(event)
+        return None
+
+    # Ctrl-C доходит до Tcl по-разному: как char «\x03», как <Control-c>
+    # (синтетические события) или как <<Copy>> (Ctrl+Insert) — слушаем всё.
+    root.bind_all("<ButtonRelease-1>", _track_selection, add="+")
+    root.bind_all("<Key>", _on_any_key, add="+")
+    root.bind_all("<Control-c>", _global_ctrl_c)
+    root.bind_all("<Control-C>", _global_ctrl_c)
+    root.bind_all("<<Copy>>", _global_ctrl_c)
+
     def rebuild_clients_area():
         """Пересоздать область вкладок по текущему списку клиентов.
 
@@ -2594,14 +2868,18 @@ def run_gui():
             txt.insert("end", original + "\n", "orig")
             if tr_var.get() and original:
                 txt.insert("end", tr("msg_untranslated") + "\n", "err")
+            txt.insert("end", "\n")
         elif translated == original:
-            txt.insert("end", original + "\n")      # сообщение уже на русском
+            # сообщение без перевода (уже на языке, языковой канал «как есть»)
+            # — пустую строку-разделитель не добавляем, интервал не нужен
+            txt.insert("end", original + "\n")
         elif orig_var.get():
             txt.insert("end", original + "\n", "orig")
             txt.insert("end", translated + "\n")
+            txt.insert("end", "\n")
         else:
             txt.insert("end", translated + "\n")    # только перевод
-        txt.insert("end", "\n")
+            txt.insert("end", "\n")
 
     def rebuild_channel(client_idx, channel):
         if client_idx >= len(clients_ui):
@@ -3081,6 +3359,15 @@ def self_test():
         good = got is not None and "(Xan) Обменяю" in got
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade WTT: {got!r}")
+        # префиксы зависят от языка перевода (баг: всегда выходило «Куплю»)
+        got, _gl = translate_trade_body("WTB rare longsword", dst="pt")
+        good = got is not None and got.startswith("Compro")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade WTB (pt): {got!r}")
+        got, _gl = translate_trade_body("(Cad) wts deed", dst="de")
+        good = got is not None and got.startswith("(Cad) Verkaufe")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade wts (de): {got!r}")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] trade-префиксы: {exc}")
@@ -3153,6 +3440,19 @@ def self_test():
         good = "2g, 50s, 30c, 40i" in got
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] валюта как есть: {got!r}")
+        # словарь: термины прячутся до перевода и возвращаются после;
+        # слова с тем же корнем («nailsmith») не трогаем
+        prot, terms = glossary_protect("wts nails for nailsmith", "ru")
+        good = (terms and not re.search(r"(?<![\w])nails(?![\w])", prot,
+                                        re.IGNORECASE)
+                and "nailsmith" in prot)
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь защита: {prot!r}")
+        fake = prot.replace(terms[0][0], "гвозди") if terms else prot
+        got = glossary_restore(fake, terms)
+        good = got.startswith("Продам гвозди")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь восстановление: {got!r}")
         # языковые каналы: детектор «… GL» по названию языка
         good = (bool(RE_LANG_CHANNEL.match("Russian GL"))
                 and bool(RE_LANG_CHANNEL.match("english gl"))

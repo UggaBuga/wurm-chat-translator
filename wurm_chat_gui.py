@@ -512,12 +512,17 @@ def translate_preserving_names(text, dst="ru"):
     """Переводит текст, не трогая <ИмяПерсонажа>, и добавляет код языка в конце.
 
     Возвращает (текст, исходный язык); язык — реальный код либо None."""
+    def norm(detected):
+        # автоопределение на коротких/формульных фразах («QL:99 DMG:0.0»)
+        # шалит и выдаёт «no», «ca» и т.п. — такой язык не поддерживаем,
+        # принимаем за английский (основной язык игрового чата)
+        return detected if detected in SUPPORTED_LANGS else "en"
+
     def with_lang(translated, detected):
-        lang = detected if detected and detected != "auto" else "und"
-        return f"{translated} ({lang})"
+        return f"{translated} ({norm(detected)})"
 
     def real_lang(detected):
-        return detected if detected and detected != "auto" else None
+        return norm(detected)
 
     parts = NAME_TOKEN_RE.split(text)
     if len(parts) == 1:
@@ -555,8 +560,7 @@ def translate_preserving_names(text, dst="ru"):
     translated = "".join(translated_parts).strip()
     if not translated:
         return None, None
-    return with_lang(translated, detected_src), \
-        detected_src if detected_src and detected_src != "auto" else None
+    return with_lang(translated, detected_src), real_lang(detected_src)
 
 
 # --------------------------------------------------------------------------- #
@@ -776,6 +780,10 @@ TRADE_PREFIXES = {
 # префикс может быть в любом регистре («wts», «Wtb»).
 RE_TRADE_PREFIX = re.compile(r"^(?:\(([A-Za-z]{2,10})\)\s*)?(WTS|WTB|WTT|PC)\b[:\s-]*",
                              re.IGNORECASE)
+# Торговые префиксы не прячем в glossary_protect до перевода: translate_trade_body
+# должен видеть их в тексте, иначе сообщение уйдёт в обычный перевод целиком
+# (с токеном на месте префикса RE_TRADE_PREFIX уже не совпадёт).
+TRADE_PREFIX_WORDS = {"wts", "wtb", "wtt", "pc"}
 
 
 def translate_trade_body(body, dst="ru"):
@@ -800,6 +808,8 @@ def translate_trade_body(body, dst="ru"):
         if tail is None:
             return None, None
         lang = detected if detected and detected != "auto" else "und"
+        if lang not in SUPPORTED_LANGS:
+            lang = "en"   # шальное автоопределение — см. norm() выше
     real = lang if lang != "und" else None
     return f"{head} {tail} ({lang})", real
 
@@ -1053,7 +1063,7 @@ def glossary_protect(text, dst="ru"):
         return text, terms
     n = 0
     for en, en_re, ru, _ru_re in _glossary_sorted_entries():
-        if en.lower() in GLOSSARY_NO_PROTECT:
+        if en.lower() in GLOSSARY_NO_PROTECT or en.lower() in TRADE_PREFIX_WORDS:
             continue
         if en_re.search(text):
             token = f"<Gl{n}>"
@@ -2376,17 +2386,24 @@ def run_gui():
             else:
                 break
         if idx is None:
+            log_debug(f"пкм {channel}: строка {line} вне записей "
+                      f"(starts={starts[:5]}…)")
             return
         entries = history.get((client_idx, channel)) or []
         if idx >= len(entries):
+            log_debug(f"пкм {channel}: idx={idx} >= записей {len(entries)}")
             return
         _t, _name, original, translated, src = entries[idx]
         # меню только для реально переведённых с иностранного языка сообщений
         if not (translated and translated != original
                 and src in SUPPORTED_LANGS):
+            log_debug(f"пкм {channel}: меню скрыто — src={src!r}, "
+                      f"translated={translated!r:.80}, original={original!r:.80}")
             return
+        log_debug(f"пкм {channel}: меню показано, src={src!r}")
 
         def reply_to():
+            log_debug(f"пкм {channel}: «ответить» нажато, dst={src}")
             reply_dst_var.set(src)
             reply_save_langs()          # сохранит выбор и пересчитает текст
             reply_entry.focus_set()     # курсор — сразу в поле ответа
@@ -3448,16 +3465,18 @@ def self_test():
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] валюта как есть: {got!r}")
         # словарь: термины прячутся до перевода и возвращаются после;
-        # слова с тем же корнем («nailsmith») не трогаем
+        # слова с тем же корнем («nailsmith») не трогаем; торговые префиксы
+        # (wts/wtb/wtt/pc) НЕ прячем — их должен видеть translate_trade_body
         prot, terms = glossary_protect("wts nails for nailsmith", "ru")
         good = (terms and not re.search(r"(?<![\w])nails(?![\w])", prot,
                                         re.IGNORECASE)
-                and "nailsmith" in prot)
+                and "nailsmith" in prot
+                and bool(re.search(r"(?<![\w])wts(?![\w])", prot, re.IGNORECASE)))
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] словарь защита: {prot!r}")
         fake = prot.replace(terms[0][0], "гвозди") if terms else prot
         got = glossary_restore(fake, terms)
-        good = got.startswith("Продам гвозди")
+        good = got.startswith("wts гвозди")
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] словарь восстановление: {got!r}")
         # языковые каналы: детектор «… GL» по названию языка

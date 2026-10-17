@@ -860,6 +860,7 @@ DEFAULT_GLOSSARY = [
     {"en": "electrum", "ru": "электрум"},
     # --- Ресурсы и урожай ---
     {"en": "wemp", "ru": "вемп"},
+    {"en": "plank", "ru": "доска"},
     {"en": "cotton", "ru": "хлопок"},
     {"en": "barley", "ru": "ячмень"},
     {"en": "wheat", "ru": "пшеница"},
@@ -1190,7 +1191,35 @@ def currency_restore(text, amounts, dst):
     return text
 
 
-def open_glossary_editor(parent):
+def preview_translation(body, target_lang, use_currency=True):
+    """Тот же конвейер перевода, что и для чатового сообщения (TranslateWorker),
+    но одной фразой: валюта и термины словаря прячутся в токены, машинный
+    перевод, пост-обработка словарём и восстановление. Для окна проверки
+    фразы в редакторе словаря. Возвращает (текст, исходный язык) или
+    (None, None) при сбое перевода."""
+    if not body:
+        return body, None
+    trade_prefixed = bool(RE_TRADE_PREFIX.match(body))
+    if target_lang == "ru" and re.search(r"[А-Яа-яЁё]", body) \
+            and not trade_prefixed:
+        return body, "ru"            # уже на языке перевода — как в чате
+    body_t, cur_amounts = currency_protect(body)
+    body_t, gl_terms = glossary_protect(body_t, target_lang)
+    if trade_prefixed:
+        translated, src_lang = translate_trade_body(body_t, target_lang)
+    else:
+        translated, src_lang = translate_preserving_names(body_t, target_lang)
+    if translated is None:
+        return None, None
+    if target_lang == "ru":
+        translated = glossary_fix(translated, "ru")
+    translated = currency_restore(translated, cur_amounts,
+                                  target_lang if use_currency else None)
+    translated = glossary_restore(translated, gl_terms)
+    return translated, src_lang
+
+
+def open_glossary_editor(parent, target_lang="ru"):
     """Ненавязчивый редактор словаря: правка прямо в ячейке двойным щелчком,
     каждое изменение сразу пишется в wurm_glossary.json и действует без
     перезапуска. Открывается по клику на ссылке «Словарь» в углу окна."""
@@ -1346,11 +1375,47 @@ def open_glossary_editor(parent):
     ttk.Label(test, textvariable=test_out, foreground="#005a9e",
               wraplength=280).pack(side="left", padx=(0, 6))
 
+    test_job = {"id": 0}
+    test_q = queue.Queue()
+
     def on_test(*_a):
-        text = test_var.get()
-        test_out.set(glossary_fix(text, "ru") if text else "—")
+        test_job["id"] += 1
+        text = test_var.get().strip()
+        if not text:
+            test_out.set("—")
+            return
+        test_out.set("…")
+        job = test_job["id"]
+        # антидребезг: переводим после короткой паузы после последней буквы
+        win.after(600, lambda: run_test(job, text))
+
+    def run_test(job, text):
+        if job != test_job["id"]:
+            return              # текст уже изменился
+        def work():
+            try:
+                res, _src = preview_translation(text, target_lang)
+            except Exception as exc:
+                res = None
+                log_debug(f"словарь: проверка фразы: {exc!r}")
+            test_q.put((job, res))
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll_test():
+        try:
+            while True:
+                job, res = test_q.get_nowait()
+                if job == test_job["id"]:
+                    test_out.set(res if res else tr("status_translate_fail"))
+        except queue.Empty:
+            pass
+        try:
+            win.after(100, poll_test)
+        except tk.TclError:
+            pass                  # окно уже закрыто
 
     test_var.trace_add("write", on_test)
+    poll_test()
 
     ttk.Label(win, textvariable=status_var, foreground="#666666").pack(
         anchor="w", padx=10, pady=(0, 6))
@@ -1640,7 +1705,7 @@ I18N = {
         "btn_add_row": "➕ Добавить",
         "btn_delete_sel": "Удалить выбранное",
         "btn_open_file": "Открыть файл…",
-        "test_frame": "Проверить фразу (как после перевода)",
+        "test_frame": "Перевести фразу (как в чате)",
         "glossary_status": "Записей: {n} — каждое изменение сохраняется сразу "
                            "и действует без перезапуска",
         "glossary_save_err": "Ошибка сохранения: {exc}",
@@ -1720,7 +1785,7 @@ I18N = {
         "btn_add_row": "➕ Add",
         "btn_delete_sel": "Delete selected",
         "btn_open_file": "Open file…",
-        "test_frame": "Test a phrase (as after translation)",
+        "test_frame": "Translate a phrase (as in chat)",
         "glossary_status": "Entries: {n} — every change is saved immediately "
                            "and applies without a restart",
         "glossary_save_err": "Save error: {exc}",
@@ -1802,7 +1867,7 @@ I18N = {
         "btn_add_row": "➕ Adicionar",
         "btn_delete_sel": "Excluir selecionados",
         "btn_open_file": "Abrir arquivo…",
-        "test_frame": "Testar frase (como após a tradução)",
+        "test_frame": "Traduzir frase (como no chat)",
         "glossary_status": "Entradas: {n} — cada alteração é salva imediatamente "
                            "e vale sem reiniciar",
         "glossary_save_err": "Erro ao salvar: {exc}",
@@ -1886,7 +1951,7 @@ I18N = {
         "btn_add_row": "➕ Hinzufügen",
         "btn_delete_sel": "Ausgewählte löschen",
         "btn_open_file": "Datei öffnen…",
-        "test_frame": "Phrase testen (wie nach der Übersetzung)",
+        "test_frame": "Phrase übersetzen (wie im Chat)",
         "glossary_status": "Einträge: {n} — jede Änderung wird sofort "
                            "gespeichert und ohne Neustart wirksam",
         "glossary_save_err": "Speicherfehler: {exc}",
@@ -1968,7 +2033,7 @@ I18N = {
         "btn_add_row": "➕ Añadir",
         "btn_delete_sel": "Eliminar seleccionados",
         "btn_open_file": "Abrir archivo…",
-        "test_frame": "Probar frase (como tras la traducción)",
+        "test_frame": "Traducir frase (como en el chat)",
         "glossary_status": "Entradas: {n} — cada cambio se guarda al instante "
                            "y aplica sin reiniciar",
         "glossary_save_err": "Error al guardar: {exc}",
@@ -2052,7 +2117,7 @@ I18N = {
         "btn_add_row": "➕ Ajouter",
         "btn_delete_sel": "Supprimer la sélection",
         "btn_open_file": "Ouvrir le fichier…",
-        "test_frame": "Tester une phrase (comme après la traduction)",
+        "test_frame": "Traduire une phrase (comme dans le chat)",
         "glossary_status": "Entrées : {n} — chaque modification est enregistrée "
                            "immédiatement et s'applique sans redémarrage",
         "glossary_save_err": "Erreur d'enregistrement : {exc}",
@@ -2131,7 +2196,7 @@ I18N = {
         "btn_add_row": "➕ 添加",
         "btn_delete_sel": "删除所选",
         "btn_open_file": "打开文件…",
-        "test_frame": "测试短语（翻译后的效果）",
+        "test_frame": "翻译短语（与聊天相同）",
         "glossary_status": "词条：{n} — 每次修改立即保存，无需重启即可生效",
         "glossary_save_err": "保存错误：{exc}",
         "err_output": "输出错误：{exc}",
@@ -2668,7 +2733,8 @@ def run_gui():
         glossary_link = tk.Label(bottom, text=tr("glossary_link"), fg="#7a9cc4",
                                  cursor="hand2", font=("Segoe UI", 8))
         glossary_link.pack(side="right", padx=(4, 4))
-        glossary_link.bind("<Button-1>", lambda _e: open_glossary_editor(root))
+        glossary_link.bind("<Button-1>",
+                           lambda _e: open_glossary_editor(root, target_lang))
     run_btn = ttk.Button(bottom, text=tr("btn_start"))
     run_btn.pack(side="right", padx=4)
     def clear_all():
@@ -3305,6 +3371,18 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] trade-префиксы: {exc}")
+    try:
+        got, src = preview_translation("уже русский текст без терминов", "ru")
+        good = got == "уже русский текст без терминов" and src == "ru"
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] проверка фразы (ru как есть): {got!r}")
+        got, src = preview_translation("", "ru")
+        good = got == "" and src is None
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] проверка фразы (пусто): {got!r}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] проверка фразы: {exc}")
     persona = steam_persona_name()
     auto = auto_logs_dir()
     good = os.path.isdir(auto)

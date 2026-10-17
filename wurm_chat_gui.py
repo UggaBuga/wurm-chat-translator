@@ -816,35 +816,30 @@ def translate_trade_body(body, dst="ru"):
 #   "en"    — английский игровой термин: если он остался в переводе нетронутым,
 #             заменяется на "ru" (по границам слова, без учёта регистра)
 #   "ru"    — правильный русский вариант термина
-#   "fix"   — список типичных кривых переводов, которые тоже заменяются на "ru"
-#             (по границам слова; строка вида "/.../" — регулярное выражение)
-#   "fix_en"— то же для обратного направления RU->EN: машинный перевод может
-#             транслитерировать термин искажённо («вемп» -> «vemp», «глимерсталь»
-#             -> «glimerstal») — такие варианты заменяются на правильный "en"
 
 GLOSSARY_FILE = os.path.join(APP_DIR, "wurm_glossary.json")
 
 DEFAULT_GLOSSARY = [
     # --- Поселения и мир ---
-    {"en": "deed", "ru": "поселение", "fix": ["документ", "дело"]},
-    {"en": "guard tower", "ru": "башня стражи", "fix": ["сторожевая вышка"]},
-    {"en": "spirit templar", "ru": "храмовник", "fix": ["тамплиер"]},
-    {"en": "guard", "ru": "страж", "fix": ["охранник"]},
-    {"en": "token", "ru": "токен", "fix": ["жетон"]},
+    {"en": "deed", "ru": "поселение"},
+    {"en": "guard tower", "ru": "башня стражи"},
+    {"en": "spirit templar", "ru": "храмовник"},
+    {"en": "guard", "ru": "страж"},
+    {"en": "token", "ru": "токен"},
     {"en": "mailbox", "ru": "почтовый ящик"},
     {"en": "trader", "ru": "торговец"},
     {"en": "merchant", "ru": "торговец"},
     # --- Качество и редкость ---
-    {"en": "ql", "ru": "ql", "fix": [r"/(?<=\d)\s*кл(?![\w])/"]},
+    {"en": "ql", "ru": "ql"},
     {"en": "rare", "ru": "редкий"},
-    {"en": "supreme", "ru": "превосходный", "fix": ["высший"]},
+    {"en": "supreme", "ru": "превосходный"},
     {"en": "fantastic", "ru": "фантастический"},
     {"en": "improve", "ru": "прокачать"},
     {"en": "grind", "ru": "гринд"},
     # --- Дерево ---
-    {"en": "applewood", "ru": "яблоня", "fix": ["яблочное дерево"]},
+    {"en": "applewood", "ru": "яблоня"},
     {"en": "birchwood", "ru": "берёза"},
-    {"en": "cedarwood", "ru": "кедр", "fix": ["кедровое дерево"]},
+    {"en": "cedarwood", "ru": "кедр"},
     {"en": "chestnutwood", "ru": "каштан"},
     {"en": "firwood", "ru": "пихта"},
     {"en": "hazelwood", "ru": "орешник"},
@@ -852,28 +847,26 @@ DEFAULT_GLOSSARY = [
     {"en": "lindenwood", "ru": "липа"},
     {"en": "maplewood", "ru": "клён"},
     {"en": "oakwood", "ru": "дуб"},
-    {"en": "olivewood", "ru": "олива", "fix": ["оливковое дерево"]},
+    {"en": "olivewood", "ru": "олива"},
     {"en": "pinewood", "ru": "сосна"},
     {"en": "raspberrywood", "ru": "малина"},
     {"en": "rosewood", "ru": "розовое дерево"},
     {"en": "walnutwood", "ru": "грецкий орех"},
     {"en": "willowwood", "ru": "ива"},
     # --- Металлы ---
-    {"en": "glimmersteel", "ru": "глимерсталь",
-     "fix": ["Gimmersteel", "Glimmersteel"],
-     "fix_en": ["glimerstal", "glimmer steel", "glimmerstal"]},
-    {"en": "seryll", "ru": "серилл", "fix_en": ["serill"]},
+    {"en": "glimmersteel", "ru": "глимерсталь"},
+    {"en": "seryll", "ru": "серилл"},
     {"en": "adamantine", "ru": "адамантин"},
     {"en": "electrum", "ru": "электрум"},
     # --- Ресурсы и урожай ---
-    {"en": "wemp", "ru": "вемп", "fix": ["сырьё", "сырье"],
-     "fix_en": ["vemp", "hemp"]},
+    {"en": "wemp", "ru": "вемп"},
     {"en": "cotton", "ru": "хлопок"},
     {"en": "barley", "ru": "ячмень"},
     {"en": "wheat", "ru": "пшеница"},
     {"en": "nails", "ru": "гвозди"},
+    {"en": "bee smoker", "ru": "окуриватель пчёл"},
     # --- Вера и магия ---
-    {"en": "favour", "ru": "фавор", "fix": ["благосклонность"]},
+    {"en": "favour", "ru": "фавор"},
     {"en": "favor", "ru": "фавор"},
     {"en": "sermon", "ru": "проповедь"},
     {"en": "cast", "ru": "каст"},
@@ -924,26 +917,26 @@ DEFAULT_GLOSSARY = [
     {"en": "pick up", "ru": "самовывоз"},
     {"en": "bulk", "ru": "опт"},
     # --- Игровые термины ---
-    {"en": "guards", "ru": "стража", "fix": ["охрана"]},
+    {"en": "guards", "ru": "стража"},
     {"en": "dmg", "ru": "урон"},
     {"en": "sb", "ru": "бонус сна"},
     {"en": "sp", "ru": "порошок сна"},
     {"en": "fs", "ru": "боевой навык"},
-    {"en": "priest", "ru": "жрец", "fix": ["священник"]},
-    {"en": "dirt", "ru": "земля", "fix": ["грязь"]},
-    {"en": "wagon", "ru": "фургон", "fix": ["вагон"]},
+    {"en": "priest", "ru": "жрец"},
+    {"en": "dirt", "ru": "земля"},
+    {"en": "wagon", "ru": "фургон"},
     {"en": "large cart", "ru": "большая телега"},
     {"en": "larder", "ru": "лардер"},
     {"en": "bsb", "ru": "большой контейнер"},
     {"en": "fsb", "ru": "контейнер для еды"},
     {"en": "ccfp", "ru": "кцфп"},
-    {"en": "affinity", "ru": "аффинити",
-     "fix": ["склонность", "сродство", "близость"]},
+    {"en": "affinity", "ru": "аффинити"},
     {"en": "unique", "ru": "уник"},
     {"en": "hota", "ru": "ХОТА"},
     {"en": "drake", "ru": "дрейк"},
     {"en": "moonmetal", "ru": "лунный металл"},
     {"en": "glim", "ru": "глим"},
+    {"en": "gm", "ru": "ГМ"},
     # --- Зачарования (энчанты) ---
     {"en": "coc", "ru": "круг хитрости"},
     {"en": "woa", "ru": "ветер эпох"},
@@ -962,25 +955,8 @@ DEFAULT_GLOSSARY = [
 ]
 
 
-def _compile_fixes(variants):
-    """Строки вариантов -> скомпилированные регэкспы (граница слева, для
-    склонений; строка вида "/.../" — регулярное выражение целиком)."""
-    res = []
-    for f in variants or []:
-        f = str(f)
-        try:
-            if len(f) > 2 and f.startswith("/") and f.endswith("/"):
-                res.append(re.compile(f[1:-1], re.IGNORECASE))
-            else:
-                res.append(re.compile(r"(?<![\w])" + re.escape(f),
-                                      re.IGNORECASE))
-        except re.error:
-            continue              # битая запись не должна ронять словарь
-    return res
-
-
 def _compile_glossary(items):
-    """Список записей -> (en, en_re, ru, fix_res, ru_re, fix_en_res)."""
+    """Список записей -> (en, en_re, ru, ru_re)."""
     entries = []
     for item in items:
         if not isinstance(item, dict):
@@ -993,9 +969,7 @@ def _compile_glossary(items):
                            re.IGNORECASE)
         ru_re = re.compile(r"(?<![\w])" + re.escape(ru) + r"(?![\w])",
                            re.IGNORECASE)
-        fix_res = _compile_fixes(item.get("fix"))
-        fix_en_res = _compile_fixes(item.get("fix_en"))
-        entries.append((en, en_re, ru, fix_res, ru_re, fix_en_res))
+        entries.append((en, en_re, ru, ru_re))
     return entries
 
 
@@ -1030,23 +1004,17 @@ def glossary_entries():
 def glossary_fix(text, dst="ru"):
     """Пост-обработка перевода игровым словарём.
 
-    dst="ru": кривые переводы и нетронутые английские термины -> ru-термин.
+    dst="ru": нетронутые английские термины -> ru-термин.
     dst="en" (панель ответа): известные ru-термины -> en, чтобы ответ вышел
     с игровой лексикой, а не дословным переводом.
     """
     if not text:
         return text
     if dst == "ru":
-        for _en, en_re, ru, fix_res, _ru_re, _fxe in glossary_entries():
-            for fr in fix_res:
-                text = fr.sub(ru, text)
+        for _en, en_re, ru, _ru_re in glossary_entries():
             text = en_re.sub(ru, text)
     elif dst == "en":
-        for en, _en_re, ru, _fix_res, ru_re, fix_en_res in glossary_entries():
-            # сначала кривые транслитерации («glimerstal» -> «glimmersteel»),
-            # потом точный ru-термин, если он остался нетронутым
-            for fr in fix_en_res:
-                text = fr.sub(en, text)
+        for en, _en_re, ru, ru_re in glossary_entries():
             text = ru_re.sub(en, text)
     return text
 
@@ -1083,7 +1051,7 @@ def glossary_protect(text, dst="ru"):
     if dst != "ru" or not text:
         return text, terms
     n = 0
-    for en, en_re, ru, _f, _r, _fe in _glossary_sorted_entries():
+    for en, en_re, ru, _ru_re in _glossary_sorted_entries():
         if en.lower() in GLOSSARY_NO_PROTECT:
             continue
         if en_re.search(text):
@@ -1240,16 +1208,12 @@ def open_glossary_editor(parent):
     # ---------- таблица ----------
     table_frame = ttk.Frame(win)
     table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-    cols = ("en", "ru", "fix", "fix_en")
+    cols = ("en", "ru")
     table = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
     table.heading("en", text=tr("col_en"))
     table.heading("ru", text=tr("col_ru"))
-    table.heading("fix", text=tr("col_fix"))
-    table.heading("fix_en", text=tr("col_fix_en"))
-    table.column("en", width=130, anchor="w")
-    table.column("ru", width=130, anchor="w")
-    table.column("fix", width=200, anchor="w")
-    table.column("fix_en", width=200, anchor="w")
+    table.column("en", width=260, anchor="w")
+    table.column("ru", width=260, anchor="w")
     scroll = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
     table.configure(yscrollcommand=scroll.set)
     table.pack(side="left", fill="both", expand=True)
@@ -1257,15 +1221,11 @@ def open_glossary_editor(parent):
 
     status_var = tk.StringVar()
 
-    def fix_to_text(fix):
-        return ", ".join(str(x) for x in (fix or []))
-
     def refresh():
         table.delete(*table.get_children())
         for i, it in enumerate(items):
             table.insert("", "end", iid=str(i), values=(
-                it.get("en", ""), it.get("ru", ""),
-                fix_to_text(it.get("fix")), fix_to_text(it.get("fix_en"))))
+                it.get("en", ""), it.get("ru", "")))
 
     def autosave():
         try:
@@ -1293,22 +1253,13 @@ def open_glossary_editor(parent):
         if i >= len(items):
             return
         it = items[i]
-        if col in ("fix", "fix_en"):
-            fix = [x.strip() for x in value.split(",") if x.strip()]
-            if fix:
-                it[col] = fix
-            else:
-                it.pop(col, None)
-        else:
-            it[col] = value
+        it[col] = value
         # пустая запись (без термина и перевода) — удаляем
         if not it.get("en") and not it.get("ru"):
             items.pop(i)
             refresh()
         else:
-            table.item(iid, values=(it.get("en", ""), it.get("ru", ""),
-                                    fix_to_text(it.get("fix")),
-                                    fix_to_text(it.get("fix_en"))))
+            table.item(iid, values=(it.get("en", ""), it.get("ru", "")))
         autosave()
 
     def cancel_edit(_e=None):
@@ -1331,10 +1282,7 @@ def open_glossary_editor(parent):
             return
         x, y, w, h = bbox
         i = int(iid)
-        if col in ("fix", "fix_en"):
-            old = fix_to_text(items[i].get(col))
-        else:
-            old = items[i].get(col, "")
+        old = items[i].get(col, "")
         entry = ttk.Entry(table_frame)
         entry.place(x=x, y=y, width=w, height=h)
         entry.insert(0, old)
@@ -1689,8 +1637,6 @@ I18N = {
         "glossary_title": "Словарь терминов",
         "col_en": "Англ. термин",
         "col_ru": "Перевод",
-        "col_fix": "Кривые варианты RU",
-        "col_fix_en": "Кривые варианты EN",
         "btn_add_row": "➕ Добавить",
         "btn_delete_sel": "Удалить выбранное",
         "btn_open_file": "Открыть файл…",
@@ -1771,8 +1717,6 @@ I18N = {
         "glossary_title": "Game glossary",
         "col_en": "EN term",
         "col_ru": "Translation",
-        "col_fix": "Broken RU variants",
-        "col_fix_en": "Broken EN variants",
         "btn_add_row": "➕ Add",
         "btn_delete_sel": "Delete selected",
         "btn_open_file": "Open file…",
@@ -1855,8 +1799,6 @@ I18N = {
         "glossary_title": "Glossário de termos",
         "col_en": "Termo em inglês",
         "col_ru": "Tradução",
-        "col_fix": "Variantes RU erradas",
-        "col_fix_en": "Variantes EN erradas",
         "btn_add_row": "➕ Adicionar",
         "btn_delete_sel": "Excluir selecionados",
         "btn_open_file": "Abrir arquivo…",
@@ -1941,8 +1883,6 @@ I18N = {
         "glossary_title": "Glossar der Begriffe",
         "col_en": "EN-Begriff",
         "col_ru": "Übersetzung",
-        "col_fix": "Fehlerhafte RU-Varianten",
-        "col_fix_en": "Fehlerhafte EN-Varianten",
         "btn_add_row": "➕ Hinzufügen",
         "btn_delete_sel": "Ausgewählte löschen",
         "btn_open_file": "Datei öffnen…",
@@ -2025,8 +1965,6 @@ I18N = {
         "glossary_title": "Glosario de términos",
         "col_en": "Término en inglés",
         "col_ru": "Traducción",
-        "col_fix": "Variantes RU erróneas",
-        "col_fix_en": "Variantes EN erróneas",
         "btn_add_row": "➕ Añadir",
         "btn_delete_sel": "Eliminar seleccionados",
         "btn_open_file": "Abrir archivo…",
@@ -2111,8 +2049,6 @@ I18N = {
         "glossary_title": "Glossaire des termes",
         "col_en": "Terme anglais",
         "col_ru": "Traduction",
-        "col_fix": "Variantes RU fautives",
-        "col_fix_en": "Variantes EN fautives",
         "btn_add_row": "➕ Ajouter",
         "btn_delete_sel": "Supprimer la sélection",
         "btn_open_file": "Ouvrir le fichier…",
@@ -2192,8 +2128,6 @@ I18N = {
         "glossary_title": "游戏术语词典",
         "col_en": "英文术语",
         "col_ru": "翻译",
-        "col_fix": "错误的俄语变体",
-        "col_fix_en": "错误的英语变体",
         "btn_add_row": "➕ 添加",
         "btn_delete_sel": "删除所选",
         "btn_open_file": "打开文件…",
@@ -3385,23 +3319,18 @@ def self_test():
         print(f"  [{'OK ' if good else 'FAIL'}] словарь: {len(entries)} записей, "
               f"файл: {GLOSSARY_FILE}")
         cases = [
-            ("Продается документ, содержание 20 шиллингов", "поселение"),
-            ("анаконда рядом с делом, будь осторожен", "поселением"),
-            ("сырьё и хлопок оптом", "вемп"),
-            ("кирку из кедра 90кл", "ql"),
-            ("Gimmersteel кусок 95ql", "глимерсталь"),
-            ("Дух-тамплиер позаботился о тролле", "храмовник"),
-            ("нужна благосклонность за каст", "фавор"),
+            ("Продается deed, содержание 20 шиллингов", "поселение"),
+            ("анаконда рядом с guard tower, будь осторожен", "башня стражи"),
+            ("wemp и хлопок оптом", "вемп"),
+            ("Glimmersteel кусок 95ql", "глимерсталь"),
+            ("Дух spirit templar позаботился о тролле", "храмовник"),
+            ("нужна favour за каст", "фавор"),
         ]
         for src, want in cases:
             got = glossary_fix(src, "ru")
             good = want in got
             ok &= good
             print(f"  [{'OK ' if good else 'FAIL'}] словарь ru: {src!r} -> {got!r}")
-        got = glossary_fix("I will buy glimerstal and vemp for favor", "en")
-        good = all(x in got.lower() for x in ("glimmersteel", "wemp"))
-        ok &= good
-        print(f"  [{'OK ' if good else 'FAIL'}] словарь en (кривые транслитерации): {got!r}")
         got = glossary_fix("продам кедр и вемп за фавор", "en")
         good = all(x in got for x in ("cedarwood", "wemp", "favour"))
         ok &= good

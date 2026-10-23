@@ -46,6 +46,10 @@
 
 ## Что нового
 
+**[v1.7.5](../../releases/tag/v1.7.5)** — оптимизация: обрезка истории чата стала инкрементальной (в оживлённых каналах после 1000 сообщений больше нет полной перерисовки вкладки на каждое сообщение), наблюдатель логов пропускает неизменённые файлы по mtime.
+
+**[v1.7.4](../../releases/tag/v1.7.4)** — сигналы на сообщения: правило может следить сразу за несколькими каналами (пустой список = любой); выбор каналов — выпадающий чек-лист прямо в ячейке, без всплывающих окон.
+
 **[v1.7.1](../../releases/tag/v1.7.1)** — словарь защищает термины до перевода: Google больше не переводит известные термины наугад («nails» → «ногти») — они прячутся в токены до перевода и подставляются в точном виде из словаря, а склейки слов вокруг них не появляются. Более 60 новых записей игрового сленга и сокращений (ty, cod, neg, wta, bsb, enchants CoC/WoA/BotD/LT/…, боги и др.). Новая вкладка «Event». В чатах без перевода (Russian GL) сообщения идут без пустых строк между ними. Копирование выделенного из чатов по Ctrl-C и вставка/вырезание в полях ввода по Ctrl-V/Ctrl-X (реальные Ctrl+C/V на Windows Tk приходят с пустым keysym и нативные привязки их не ловят). Префиксы Trade (WTS/WTB/PC/WTT) переводятся на текущем целевом языке, а не всегда на русском.
 
 **[v1.7.0](../../releases/tag/v1.7.0)** — игровая валюта: суммы вида «20s», «2g 50s 30c 40i» переводятся словами на языке перевода («20 серебра», «2 золота, 50 серебра, 30 меди, 40 железа»; для остальных языков — соответственно). Суммы прячутся в защищённые токены до перевода, поэтому Google их не коверкает; соседние суммы разделяются запятой, русские числительные склоняются (1 золото, 20 серебра). Языковые чаты («Russian GL») по умолчанию не переводятся совсем — показываются как есть; обе опции переключаются в новом окне «Настройки…», изменения применяются без перезапуска.
@@ -137,6 +141,10 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.5](../../releases/tag/v1.7.5)** — otimização: o corte do histórico do chat ficou incremental (em canais movimentados após 1000 mensagens não há mais redesenho da aba inteira a cada mensagem), e o observador de logs ignora arquivos sem alteração pelo mtime.
+
+**[v1.7.4](../../releases/tag/v1.7.4)** — alertas de mensagens: uma regra pode monitorar vários canais de uma vez (lista vazia = qualquer canal); a escolha de canais é uma lista suspensa com caixas de seleção direto na célula, sem janelas pop-up.
 
 **[v1.7.1](../../releases/tag/v1.7.1)** — o glossário protege os termos antes da tradução: o Google não traduz mais os termos conhecidos ao acaso («nails» → «ногти») — eles são escondidos em tokens antes da tradução e inseridos em forma exata do glossário, e não aparecem mais colagens de palavras em volta deles. Mais de 60 novos registros de gíria e abreviações do jogo (ty, cod, neg, wta, bsb, encantamentos CoC/WoA/BotD/LT/…, deuses etc.). Nova aba «Event». Nos chats sem tradução (Russian GL) as mensagens vão sem linhas em branco entre elas. Cópia do selecionado dos chats com Ctrl-C e colar/cortar nos campos de entrada com Ctrl-V/Ctrl-X. Prefixos de Trade (WTS/WTB/PC/WTT) traduzidos no idioma de destino atual, e não sempre para o russo.
 

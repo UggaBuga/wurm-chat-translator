@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """GUI-тест диалога «Сигналы на сообщения»: исполняет РЕАЛЬНЫЙ код функции
 open_alerts_dialog, извлечённый из wurm_chat_gui.py через ast, и симулирует
-мышь/клавиатуру. Проверяет: переключение флажка, смену канала, правку
-подстроки двойным щелчком, добавление и удаление правила, автосохранение."""
+мышь/клавиатуру. Проверяет: переключение флажка, выпадающий чек-лист каналов
+(применяется сразу, не закрывается при выборе, закрывается кликом мимо и по
+Escape), правку подстроки двойным щелчком, добавление и удаление правила,
+автосохранение."""
 import ast
 import importlib.util
 import sys
@@ -36,7 +38,8 @@ def save_config(c):
 root = tk.Tk()
 root.geometry("120x60+0+0")
 ns = {"tk": tk, "ttk": ttk, "tr": m.tr, "cfg": cfg,
-      "save_config": save_config, "CHANNELS": m.CHANNELS, "root": root}
+      "save_config": save_config, "CHANNELS": m.CHANNELS, "root": root,
+      "rule_channels": m.rule_channels}
 exec(code, ns)
 ns["open_alerts_dialog"]()
 win = root.winfo_children()[-1]
@@ -60,10 +63,10 @@ tree = find_tree(win)
 
 def click(col):
     bbox = tree.bbox("0", col)
-    print("bbox", col, bbox, flush=True)
     assert bbox, f"нет bbox для {col}"
     x, y, w, h = bbox
     tree.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2)
+    root.update()
     win.update()
 
 
@@ -71,7 +74,6 @@ def dblclick(col):
     bbox = tree.bbox("0", col)
     assert bbox, f"нет bbox для {col}"
     x, y, w, h = bbox
-    print("dblclick генерирую", col, flush=True)
     # event_generate не принимает модификатор Double; Tk засчитывает двойной
     # клик по меткам времени — event generate с -time (32-битное, мс)
     now = int(tree.tk.call("clock", "milliseconds")) % (2 ** 31)
@@ -79,9 +81,7 @@ def dblclick(col):
         tree.tk.call("event", "generate", tree._w, "<Button-1>",
                      "-x", x + w // 2, "-y", y + h // 2,
                      "-time", now + i * 100)
-    print("dblclick сгенерирован", flush=True)
     win.update()
-    print("update после dblclick", flush=True)
 
 
 def entry_open():
@@ -99,27 +99,18 @@ def entry_open():
 
 
 def type_in_entry(entry, text):
-    print("ввод: вошёл в функцию", flush=True)
-    exists = entry.tk.call("winfo", "exists", entry._w)
-    print("ввод: exists =", exists, flush=True)
     entry.delete(0, "end")
-    print("ввод: удалил", flush=True)
     entry.insert(0, text)
-    print("ввод: вставил", flush=True)
     entry.event_generate("<Return>")
-    print("ввод: Return сгенерирован", flush=True)
     win.update()
-    print("ввод: update прошёл", flush=True)
 
 
 def check_focus(entry, where):
     win.update()
     focused = win.tk.call("focus", "-displayof", win._w)
-    ok = str(focused) == str(entry._w)
-    print("фокус", where, ":", repr(str(focused)), "==", repr(str(entry._w)),
-          "->", ok, "| autosave вызовов:", len(saved), flush=True)
-    if not ok:
-        raise SystemExit("ФОКУС НЕ В ПОЛЕ")
+    assert str(focused) == str(entry._w), f"ФОКУС НЕ В ПОЛЕ ({where})"
+
+
 def row_values(iid="0"):
     return tree.item(iid, "values")
 
@@ -135,23 +126,105 @@ def find_button(text):
     return walk(win)
 
 
+def find_dropdown():
+    """Выпадающий чек-лист — tk.Listbox, размещённый через place."""
+    found = []
+
+    def walk(w):
+        for ch in w.winfo_children():
+            if isinstance(ch, tk.Listbox):
+                found.append(ch)
+            walk(ch)
+
+    walk(win)
+    return found
+
+
 # 1) исходное состояние
 v = row_values()
-print("исходная строка:", v)
 assert v[1] == "Event" and v[2] == "complete the location details"
 
 # 2) щелчок по «Уведомл.» выключает notify
 click("notify")
 v = row_values()
-print("после клика по notify:", v)
 assert v[4] == "—", "notify не переключился"
 assert saved and saved[-1][0]["notify"] is False, "нет автосохранения"
 
-# 3) щелчок по каналу переключает его
+# 3) щелчок по каналу открывает выпадающий чек-лист внутри окна
 click("channel")
+win.update()
+drops = find_dropdown()
+assert len(drops) == 1, f"чек-лист не открылся: {len(drops)}"
+dd = drops[0]
+
+names = [m.tr("alert_any")] + [n for n, _, _ in m.CHANNELS]
+
+
+def dd_items():
+    return [dd.get(i) for i in range(dd.size())]
+
+
+items = dd_items()
+assert any(m.tr("alert_any") in it for it in items), "нет пункта «Любой»"
+assert any("Local" in it for it in items), "нет пункта «Local»"
+assert any("Event" in it and "☑" in it for it in items), \
+    "Event не отмечен галочкой"
+
+
+def toggle(name):
+    """Клик по пункту списка — синтетическим событием по bbox."""
+    idx = names.index(name)
+    bbox = dd.bbox(idx)
+    assert bbox, f"нет bbox для пункта {name}"
+    x, y, w, h = bbox
+    dd.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2)
+    root.update()
+    win.update()
+
+
+toggle("Village")
+assert find_dropdown(), "список закрылся после выбора канала!"
 v = row_values()
-print("после клика по каналу:", v)
-assert v[1] != "Event", "канал не переключился"
+assert v[1] == "Village, Event", f"ожидалось 'Village, Event', получено {v[1]!r}"
+assert saved[-1][0]["channels"] == ["Village", "Event"], "channels не сохранились"
+assert "channel" not in saved[-1][0], "старый ключ channel не удалён"
+toggle("Local")
+assert find_dropdown(), "список закрылся после выбора канала!"
+v = row_values()
+assert v[1] == "Local, Village, Event", \
+    f"ожидалось 'Local, Village, Event', получено {v[1]!r}"
+assert saved[-1][0]["channels"] == ["Local", "Village", "Event"]
+toggle("Village")                # снять галочку — Village уходит
+v = row_values()
+assert v[1] == "Local, Event", f"ожидалось 'Local, Event', получено {v[1]!r}"
+assert saved[-1][0]["channels"] == ["Local", "Event"]
+assert find_dropdown(), "список закрылся до закрытия"
+
+# «Любой» сбрасывает выбранные каналы
+toggle(m.tr("alert_any"))
+v = row_values()
+assert v[1] == m.tr("alert_any"), f"ожидался «Любой», получено {v[1]!r}"
+assert saved[-1][0]["channels"] == [], "channels не сброшены"
+toggle("Event")                  # вернуть Event как было
+v = row_values()
+assert v[1] == "Event"
+assert find_dropdown(), "список закрылся"
+
+# 3б) Escape закрывает список; повторный щелчок по каналу открывает снова
+win.event_generate("<Escape>")
+win.update()
+assert not find_dropdown(), "список не закрылся по Escape"
+click("channel")
+win.update()
+assert find_dropdown(), "список не переоткрылся по щелчку"
+# клик мимо закрывает список, но сам щелчок отрабатывает (флажок переключится)
+click("notify")
+win.update()
+assert not find_dropdown(), "список не закрылся по клику мимо"
+v = row_values()
+assert v[4] == "✓", "клик мимо не должен съедать щелчок по флажку"
+click("notify")                   # вернуть как было
+win.update()
 
 # 4) двойной щелчок по подстроке → редактирование в ячейке
 e = None
@@ -162,17 +235,13 @@ for attempt in range(5):
         break
 assert e is not None, "поле ввода не открылось"
 check_focus(e, "после двойного клика")
-print("перед вводом: autosave вызовов:", len(saved), flush=True)
 type_in_entry(e, "wtb rare")
 v = row_values()
-print("после правки подстроки:", v, "| saved:", saved[-1], flush=True)
 assert v[2] == "wtb rare", "подстрока не изменилась"
 assert saved[-1][0]["pattern"] == "wtb rare"
 
 # 5) «Новый» → сразу открывается ввод подстроки
-print("ищу кнопку", repr(m.tr("alerts_add")), flush=True)
 btn_add = find_button(m.tr("alerts_add"))
-print("кнопка:", btn_add, flush=True)
 btn_add.invoke()
 e = None
 for attempt in range(5):
@@ -184,28 +253,23 @@ assert e is not None, "после «Новый» ввод не открылся"
 check_focus(e, "после «Новый»")
 type_in_entry(e, "hello world")
 ids = tree.get_children()
-print("строк после добавления:", len(ids), row_values(str(len(ids) - 1)), flush=True)
 assert len(ids) == 2, "правило не добавилось"
 assert saved[-1][1]["pattern"] == "hello world"
 
 # 6) «Удалить» удаляет выбранное
-print("шаг 6", flush=True)
 tree.selection_set("0")
 btn_del = find_button(m.tr("alerts_remove"))
 btn_del.invoke()
 win.update()
 ids = tree.get_children()
-print("строк после удаления:", len(ids), row_values("0"), flush=True)
 assert len(ids) == 1, "правило не удалилось"
 assert saved[-1][0]["pattern"] == "hello world"
 
 # 7) «Закрыть» сохраняет и уничтожает окно
-print("шаг 7", flush=True)
 btn_close = find_button(m.tr("btn_close"))
 btn_close.invoke()
 win.update()
 alive = bool(int(win.tk.call("winfo", "exists", win._w)))
-print("окно закрыто:", not alive, "| итог в cfg:", cfg["alerts"], flush=True)
 assert not alive, "окно не закрылось"
 assert cfg["alerts"][0]["pattern"] == "hello world"
 

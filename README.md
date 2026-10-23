@@ -2,7 +2,12 @@
 
 Переводчик чатов для игры **Wurm Online**. Отслеживает текстовые логи игры и показывает сообщения по каналам во вкладках, с переводом на язык игрока.
 
+**English:** a chat translator for **Wurm Online** — it watches the game's text logs and shows channel messages in tabs, translated into the player's language. Works out of the box on Windows, no API keys.
+
+**Português:** tradutor de chats para **Wurm Online** — acompanha os logs de texto do jogo e mostra as mensagens por canal em abas, traduzidas para o seu idioma. Funciona direto no Windows, sem chaves de API. [Versão completa em português ↓](#pt)
+
 [![Скачать WurmChatTranslator.exe](https://img.shields.io/badge/Скачать-WurmChatTranslator.exe-0066ff)](https://github.com/UggaBuga/wurm-chat-translator/releases/latest/download/WurmChatTranslator.exe)
+[![Baixar WurmChatTranslator.exe](https://img.shields.io/badge/Baixar-WurmChatTranslator.exe-008800)](https://github.com/UggaBuga/wurm-chat-translator/releases/latest/download/WurmChatTranslator.exe)
 [![Скачивания](https://img.shields.io/github/downloads/UggaBuga/wurm-chat-translator/total?label=Загрузки)](https://github.com/UggaBuga/wurm-chat-translator/releases)
 
 ![Скриншот](screenshot.png)
@@ -87,6 +92,8 @@ pythonw wurm_chat_gui.py
 MIT
 
 ---
+
+<a id="pt"></a>
 
 # Wurm Chat Translator — Português
 

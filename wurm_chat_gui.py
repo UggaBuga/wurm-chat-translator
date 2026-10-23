@@ -50,7 +50,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -732,6 +732,7 @@ class LogWatcher(threading.Thread):
         self.start_at_end = start_at_end
         self.offsets = {}          # путь -> позиция
         self.pending = {}          # путь -> незавершённый хвост строки
+        self.mtimes = {}           # путь -> mtime последнего прочтения
         # Файлы, существовавшие при запуске, пропускаем до конца (старая
         # история не нужна). Файлы, появившиеся позже (новая переписка ЛС,
         # лог нового месяца), читаются с самого начала.
@@ -774,19 +775,28 @@ class LogWatcher(threading.Thread):
         for name, prefix, is_pm in CHANNELS:
             for path in self.current_paths(prefix, is_pm):
                 try:
-                    if path not in self.offsets:
-                        # Новый файл, появившийся во время работы (переписка
-                        # ЛС, лог нового месяца) — читаем с начала.
-                        self.offsets[path] = 0
-                        self.pending[path] = ""
-                    if os.path.getsize(path) < self.offsets[path]:
-                        self.offsets[path] = 0   # файл перезаписан
-                        self.pending[path] = ""
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                if path not in self.offsets:
+                    # Новый файл, появившийся во время работы (переписка
+                    # ЛС, лог нового месяца) — читаем с начала.
+                    self.offsets[path] = 0
+                    self.pending[path] = ""
+                if st.st_size < self.offsets[path]:
+                    self.offsets[path] = 0   # файл перезаписан
+                    self.pending[path] = ""
+                if (self.mtimes.get(path) == st.st_mtime_ns
+                        and st.st_size == self.offsets[path]):
+                    continue                # файл не менялся — не открываем
+                new_data = None
+                try:
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
                         f.seek(self.offsets[path])
                         new_data = f.read()
                         if new_data:
                             self.offsets[path] = f.tell()
+                    self.mtimes[path] = st.st_mtime_ns
                 except (OSError, PermissionError):
                     continue
                 # Клиент игры может сбрасывать строку в файл частями: обрабатываем
@@ -3168,9 +3178,27 @@ def run_gui():
         entry = (time_s, name, original, translated, src_lang)
         key = (client_idx, channel)
         history.setdefault(key, []).append(entry)
-        if len(history[key]) > HISTORY_MAX:
-            history[key] = history[key][-HISTORY_MAX:]
-            rebuild_channel(client_idx, channel)   # удалили хвост — перерисовали
+        overflow = len(history[key]) - HISTORY_MAX
+        if overflow > 0:
+            del history[key][:overflow]     # хвост истории вытеснен
+            if client_idx < len(clients_ui):
+                txt, _ = clients_ui[client_idx]["tabs"][channel]
+                starts = entry_starts.setdefault(txt, [])
+                if len(starts) >= overflow:
+                    # инкрементально: удаляем из виджета только вытесненное,
+                    # а не перерисовываем все 1000 записей заново
+                    del starts[:overflow]
+                    txt.config(state="normal")
+                    if starts and starts[0] > 1:
+                        first = starts[0]
+                        txt.delete("1.0", f"{first}.0")
+                        for i in range(len(starts)):
+                            starts[i] -= first - 1
+                    else:
+                        txt.delete("1.0", "end")
+                    txt.config(state="disabled")
+                else:
+                    rebuild_channel(client_idx, channel)
         elif client_idx < len(clients_ui):
             txt, _ = clients_ui[client_idx]["tabs"][channel]
             # автопрокрутка только если пользователь уже внизу; если он

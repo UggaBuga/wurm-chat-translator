@@ -12,6 +12,20 @@
 
 ![Скриншот](screenshot.png)
 
+<details>
+<summary><b>English</b></summary>
+
+![Screenshot (English)](screenshot_en.png)
+
+</details>
+
+<details>
+<summary><b>Português</b></summary>
+
+![Captura de tela (Português)](screenshot_pt.png)
+
+</details>
+
 ## Возможности
 
 - **Вкладки по каналам** — Local, Village, Alliance, Trade, Freedom, GL-Freedom, Russian GL, CA Help, PM; вкладка с новыми сообщениями подсвечивается ярко-синим, при открытии признак пропадает
@@ -98,6 +112,8 @@ MIT
 # Wurm Chat Translator — Português
 
 Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jogo e mostra as mensagens por canal em abas, com tradução para o idioma do jogador.
+
+![Captura de tela (Português)](screenshot_pt.png)
 
 [![Baixar WurmChatTranslator.exe](https://img.shields.io/badge/Baixar-WurmChatTranslator.exe-0066ff)](https://github.com/UggaBuga/wurm-chat-translator/releases/latest/download/WurmChatTranslator.exe)
 [![Downloads](https://img.shields.io/github/downloads/UggaBuga/wurm-chat-translator/total?label=Downloads)](https://github.com/UggaBuga/wurm-chat-translator/releases)

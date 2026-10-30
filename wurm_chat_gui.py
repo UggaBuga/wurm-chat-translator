@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.5.4"
+APP_VERSION = "1.7.6.0"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -63,6 +63,9 @@ DEBUG_FILE = os.path.join(APP_DIR, "wurm_chat_gui_debug.log")
 # уже запущенный экземпляр показывает своё окно (в т.ч. из трея).
 MUTEX_NAME = "Global\\WurmChatTranslator_SingleInstance_v1"
 ACTIVATE_TRIGGER = os.path.join(APP_DIR, ".wurm_chat_activate")
+# Смена языка интерфейса пересоздаёт окно: run_gui поднимает флаг, main
+# запускает его заново (цикл вместо рекурсии — стек не растёт).
+_RESTART_REQUESTED = {"v": False}
 
 
 def _single_instance_mutex():
@@ -139,6 +142,7 @@ def log_debug(msg):
 
 def bind_copy(widget):
     """Ctrl-C / Ctrl-Insert в read-only Text: Tk на Windows не копирует сам."""
+    import tkinter as tk   # лениво: на глобальном уровне модуля tkinter нет
     def _copy(_event=None):
         try:
             sel = widget.get("sel.first", "sel.last")
@@ -561,6 +565,10 @@ def translate_preserving_names(text, dst="ru"):
     translated = "".join(translated_parts).strip()
     if not translated:
         return None, None
+    if detected_src is None:
+        # переводимых кусков не было (сообщение — только <Имя>) — хвост
+        # «(lang)» не к чему привязывать
+        return translated, None
     return with_lang(translated, detected_src), real_lang(detected_src)
 
 
@@ -667,6 +675,9 @@ def show_notification(title, message):
                 '<toast><visual><binding template="ToastGeneric">'
                 f'<text>{title}</text><text>{message}</text>'
                 '</binding></visual></toast>')
+            # апостроф в тексте сообщения рвал PS-строку в одинарных кавычках:
+            # в PS он экранируется удвоением
+            xml_str = xml_str.replace("'", "''")
             ps = (
                 "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null\n"
                 "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null\n"
@@ -674,21 +685,31 @@ def show_notification(title, message):
                 "$doc = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
                 "$doc.LoadXml($xml)\n"
                 "$toast = [Windows.UI.Notifications.ToastNotification]::new($doc)\n"
+                # тосты живут час — иначе копятся в центре уведомлений
+                "$toast.ExpirationTime = [DateTimeOffset]::Now.AddHours(1)\n"
                 # AUMID обязан быть зарегистрирован в Windows (ярлык в меню
                 # «Пуск»), иначе тост молча не показывается. Свой «WurmChatGUI»
                 # не зарегистрирован — отправляем от имени PowerShell.
                 "$appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'\n"
                 "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)\n")
+            # Команда целиком в base64 (UTF-16LE): апострофы/кавычки/юникод
+            # в тексте сообщения не могут сломать разбор PowerShell.
+            import base64
+            encoded = base64.b64encode(
+                ps.encode("utf-16-le")).decode("ascii")
             creationflags = 0
             if hasattr(subprocess, "CREATE_NO_WINDOW"):
                 creationflags = subprocess.CREATE_NO_WINDOW  # не мигать консолью
             subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                ["powershell", "-NoProfile", "-NonInteractive",
+                 "-EncodedCommand", encoded],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=creationflags)
         elif system == "Darwin":
+            esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
             subprocess.Popen(["osascript", "-e",
-                              f'display notification "{message}" with title "{title}"'])
+                              f'display notification "{esc(message)}" '
+                              f'with title "{esc(title)}"'])
         else:
             try:
                 subprocess.Popen(["notify-send", title, message])
@@ -696,6 +717,51 @@ def show_notification(title, message):
                 pass
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Звуки уведомлений: встроенная коллекция (папка sounds рядом с exe / в репозитории)
+# --------------------------------------------------------------------------- #
+BUILTIN_SOUNDS = ("beep", "chime", "bell", "ding", "pop", "alarm")
+
+
+def sounds_dir():
+    """Папка со встроенными звуками: в exe они распакованы рядом со скриптом
+    (sys._MEIPASS), при обычном запуске — папка sounds в каталоге программы."""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            candidates.append(os.path.join(base, "sounds"))
+    candidates.append(os.path.join(APP_DIR, "sounds"))
+    candidates.append(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sounds"))
+    for cand in candidates:
+        if cand and os.path.isdir(cand):
+            return cand
+    return None
+
+
+def resolve_sound_path(sound_id, custom="", sdir=None):
+    """Путь к wav для проигрывания: свой файл важнее встроенного;
+    неизвестный/отсутствующий id — None (тогда звучит сигнал по умолчанию)."""
+    if custom and os.path.isfile(custom):
+        return custom
+    d = sounds_dir() if sdir is None else sdir
+    if d and sound_id:
+        path = os.path.join(d, f"{sound_id}.wav")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def mentioned_in(text, player_name):
+    """Упоминается ли имя игрока в тексте? Границы слова, без учёта регистра."""
+    pname = (player_name or "").strip()
+    if not pname or not text:
+        return False
+    return bool(re.search(r"(?<![\w])" + re.escape(pname) + r"(?![\w])",
+                          text, re.IGNORECASE))
 
 
 # --------------------------------------------------------------------------- #
@@ -876,7 +942,9 @@ def match_alert_rules(rules, channel, original, translated):
     Каналы правила: пустой список — совпадает с любым каналом, иначе сообщение
     должно быть из одного из перечисленных. Подстрока ищется в оригинале и в
     переводе, без учёта регистра. Срабатывание антиспамится: одно правило в
-    одном канале — не чаще раза в ALERT_THROTTLE_SECONDS."""
+    одном канале — не чаще раза в ALERT_THROTTLE_SECONDS (троттлинг по
+    правилу, а не по подстроке: две одинаковые подстроки в разных правилах
+    не делят между собой окно антиспама)."""
     fired = []
     haystacks = [(original or "").lower(), (translated or "").lower()]
     now = time.monotonic()
@@ -891,11 +959,16 @@ def match_alert_rules(rules, channel, original, translated):
             continue
         if not any(pattern.lower() in h for h in haystacks):
             continue
-        key = (pattern.lower(), channel)
+        key = (id(rule), channel)
         if now - _alert_last_fired.get(key, 0.0) < ALERT_THROTTLE_SECONDS:
             continue
         _alert_last_fired[key] = now
         fired.append(rule)
+    # удалённые/переписанные правила оставляют мёртвые ключи — подчищаем разом
+    if len(_alert_last_fired) > 200:
+        for k, t in list(_alert_last_fired.items()):
+            if now - t > ALERT_THROTTLE_SECONDS:
+                del _alert_last_fired[k]
     return fired
 
 
@@ -1047,7 +1120,7 @@ def translate_trade_body(body, dst="ru"):
     if server:
         head = f"({server}) {head}"
     if not rest.strip():
-        return f"{head} (en)", "en"
+        return head, "en"       # одни префикс: языковой хвост не к чему
     if dst == "ru" and re.search(r"[А-Яа-яЁё]", rest):
         tail, lang = rest, "ru"   # остаток уже на русском
     else:
@@ -1283,16 +1356,25 @@ def glossary_fix(text, dst="ru"):
 # защищаются до перевода — см. glossary_protect/glossary_restore.
 GLOSSARY_NO_PROTECT = {"pm"}
 
-_glossary_sorted = {"entries": None}
+_glossary_sorted = {"mtime": None, "entries": None}
 
 
 def _glossary_sorted_entries():
     """Записи словаря, отсортированные по длине en (длинные — первыми:
-    «guard tower» должен матчиться раньше, чем «guard»)."""
+    «guard tower» должен матчиться раньше, чем «guard»).
+
+    Кэш живёт ровно столько, сколько основной (по mtime файла): внешняя
+    правка wurm_glossary.json подхватывается без перезапуска программы."""
     entries = glossary_entries()
-    if _glossary_sorted["entries"] is not None:
+    try:
+        mtime = os.path.getmtime(GLOSSARY_FILE)
+    except OSError:
+        mtime = None
+    if _glossary_sorted["entries"] is not None \
+            and mtime == _glossary_sorted["mtime"]:
         return _glossary_sorted["entries"]
     ordered = sorted(entries, key=lambda e: -len(e[0]))
+    _glossary_sorted["mtime"] = mtime
     _glossary_sorted["entries"] = ordered
     return ordered
 
@@ -1351,6 +1433,26 @@ def glossary_restore(text, terms):
     return text
 
 
+def glossary_protect_ru(text):
+    """Обратная защита для панели ответа (ru → en): известные ru-термины
+    прячутся в токены ДО перевода, после — на место встаёт en-термин.
+
+    Без этого Google переводил термины наугад («вемп» -> «hemp») и
+    пост-замена glossary_fix(en) уже не могла ничего исправить. Возвращает
+    (текст, [(токен, en), ...]) — восстановление общее, glossary_restore."""
+    terms = []
+    if not text:
+        return text, terms
+    n = 0
+    for en, _en_re, ru, ru_re in _glossary_sorted_entries():
+        if ru_re.search(text):
+            token = f"<Gl{n}>"
+            text = ru_re.sub(token, text)
+            terms.append((token, en))
+        n += 1
+    return text, terms
+
+
 def glossary_raw_items():
     """Сырой список записей словаря (dict'ы) из файла или встроенный."""
     try:
@@ -1369,7 +1471,7 @@ def glossary_save_items(items):
     with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
     _glossary_cache.update(mtime=None, entries=None)
-    _glossary_sorted["entries"] = None
+    _glossary_sorted.update(mtime=None, entries=None)
 
 
 # --------------------------------------------------------------------------- #
@@ -1794,7 +1896,9 @@ DEFAULTS = {
     "translate": True,
     "on_top": False,
     "show_original": False,
-    "sound_file": "",
+    "sound_file": "",       # свой wav-файл (если задан — важнее встроенных)
+    "sound": "beep",        # встроенный звук: id из BUILTIN_SOUNDS
+    "channel_sounds": {},   # звук по каналам: {"Trade": "bell", …} ; пусто = общий
     "target_lang": "auto",   # auto → определить по языку клиента Steam
     "reply_src": "",         # "" → как основной язык перевода; иначе явный код
     "reply_dst": "en",       # панель ответа: на какой язык переводить
@@ -2011,6 +2115,22 @@ I18N = {
                            "и действует без перезапуска",
         "glossary_save_err": "Ошибка сохранения: {exc}",
         "err_output": "Ошибка вывода: {exc}",
+        "opt_sound": "Звук уведомлений:",
+        "btn_play": "Прослушать",
+        "tab_menu_sound_pick": "Звук этого канала",
+        "sound_default": "Как общий",
+        "alerts_log_btn": "Журнал",
+        "alerts_log_title": "Журнал срабатываний сигналов",
+        "alerts_log_empty": "Срабатываний пока не было.",
+        "alerts_log_col_time": "Время",
+        "alerts_log_col_channel": "Канал",
+        "alerts_log_col_text": "Текст",
+        "snd_beep": "Стандартный",
+        "snd_chime": "Колокольчик",
+        "snd_bell": "Колокол",
+        "snd_ding": "Дзынь",
+        "snd_pop": "Поп",
+        "snd_alarm": "Тревога",
     },
     "en": {
         "app_title": "Wurm Chat Translator",
@@ -2122,6 +2242,22 @@ I18N = {
                            "and applies without a restart",
         "glossary_save_err": "Save error: {exc}",
         "err_output": "Output error: {exc}",
+        "opt_sound": "Notification sound:",
+        "btn_play": "Play",
+        "tab_menu_sound_pick": "Sound for this channel",
+        "sound_default": "Same as global",
+        "alerts_log_btn": "Log",
+        "alerts_log_title": "Alert history",
+        "alerts_log_empty": "No alerts yet.",
+        "alerts_log_col_time": "Time",
+        "alerts_log_col_channel": "Channel",
+        "alerts_log_col_text": "Text",
+        "snd_beep": "Default",
+        "snd_chime": "Chime",
+        "snd_bell": "Bell",
+        "snd_ding": "Ding",
+        "snd_pop": "Pop",
+        "snd_alarm": "Alarm",
     },
     "pt": {
         "app_title": "Wurm Chat — Tradutor",
@@ -2235,6 +2371,22 @@ I18N = {
                            "e vale sem reiniciar",
         "glossary_save_err": "Erro ao salvar: {exc}",
         "err_output": "Erro de saída: {exc}",
+        "opt_sound": "Som de notificação:",
+        "btn_play": "Ouvir",
+        "tab_menu_sound_pick": "Som deste canal",
+        "sound_default": "Como o geral",
+        "alerts_log_btn": "Registro",
+        "alerts_log_title": "Histórico de alertas",
+        "alerts_log_empty": "Nenhum alerta ainda.",
+        "alerts_log_col_time": "Hora",
+        "alerts_log_col_channel": "Canal",
+        "alerts_log_col_text": "Texto",
+        "snd_beep": "Padrão",
+        "snd_chime": "Carrilhão",
+        "snd_bell": "Sino",
+        "snd_ding": "Ding",
+        "snd_pop": "Pop",
+        "snd_alarm": "Alarme",
     },
     "de": {
         "app_title": "Wurm Chat — Übersetzer",
@@ -2351,6 +2503,22 @@ I18N = {
                            "gespeichert und ohne Neustart wirksam",
         "glossary_save_err": "Speicherfehler: {exc}",
         "err_output": "Ausgabefehler: {exc}",
+        "opt_sound": "Benachrichtigungston:",
+        "btn_play": "Anhören",
+        "tab_menu_sound_pick": "Ton für diesen Kanal",
+        "sound_default": "Wie global",
+        "alerts_log_btn": "Protokoll",
+        "alerts_log_title": "Signalprotokoll",
+        "alerts_log_empty": "Noch keine Signale.",
+        "alerts_log_col_time": "Zeit",
+        "alerts_log_col_channel": "Kanal",
+        "alerts_log_col_text": "Text",
+        "snd_beep": "Standard",
+        "snd_chime": "Glockenspiel",
+        "snd_bell": "Glocke",
+        "snd_ding": "Ding",
+        "snd_pop": "Plopp",
+        "snd_alarm": "Alarm",
     },
     "es": {
         "app_title": "Wurm Chat — Traductor",
@@ -2464,6 +2632,22 @@ I18N = {
                            "y aplica sin reiniciar",
         "glossary_save_err": "Error al guardar: {exc}",
         "err_output": "Error de salida: {exc}",
+        "opt_sound": "Sonido de notificación:",
+        "btn_play": "Escuchar",
+        "tab_menu_sound_pick": "Sonido de este canal",
+        "sound_default": "Como el general",
+        "alerts_log_btn": "Registro",
+        "alerts_log_title": "Historial de alertas",
+        "alerts_log_empty": "Aún no hay alertas.",
+        "alerts_log_col_time": "Hora",
+        "alerts_log_col_channel": "Canal",
+        "alerts_log_col_text": "Texto",
+        "snd_beep": "Estándar",
+        "snd_chime": "Campana",
+        "snd_bell": "Campanario",
+        "snd_ding": "Ding",
+        "snd_pop": "Pop",
+        "snd_alarm": "Alarma",
     },
     "fr": {
         "app_title": "Wurm Chat — Traducteur",
@@ -2580,6 +2764,22 @@ I18N = {
                            "immédiatement et s'applique sans redémarrage",
         "glossary_save_err": "Erreur d'enregistrement : {exc}",
         "err_output": "Erreur de sortie : {exc}",
+        "opt_sound": "Son de notification :",
+        "btn_play": "Écouter",
+        "tab_menu_sound_pick": "Son de ce canal",
+        "sound_default": "Comme le réglage général",
+        "alerts_log_btn": "Journal",
+        "alerts_log_title": "Journal des alertes",
+        "alerts_log_empty": "Aucune alerte pour le moment.",
+        "alerts_log_col_time": "Heure",
+        "alerts_log_col_channel": "Canal",
+        "alerts_log_col_text": "Texte",
+        "snd_beep": "Standard",
+        "snd_chime": "Carillon",
+        "snd_bell": "Cloche",
+        "snd_ding": "Ding",
+        "snd_pop": "Pop",
+        "snd_alarm": "Alerte",
     },
     "zh": {
         "app_title": "Wurm 聊天翻译器",
@@ -2687,6 +2887,22 @@ I18N = {
         "glossary_status": "词条：{n} — 每次修改立即保存，无需重启即可生效",
         "glossary_save_err": "保存错误：{exc}",
         "err_output": "输出错误：{exc}",
+        "opt_sound": "通知声音：",
+        "btn_play": "试听",
+        "tab_menu_sound_pick": "此频道的声音",
+        "sound_default": "同全局",
+        "alerts_log_btn": "日志",
+        "alerts_log_title": "提醒记录",
+        "alerts_log_empty": "暂无提醒。",
+        "alerts_log_col_time": "时间",
+        "alerts_log_col_channel": "频道",
+        "alerts_log_col_text": "内容",
+        "snd_beep": "默认",
+        "snd_chime": "风铃",
+        "snd_bell": "钟声",
+        "snd_ding": "叮",
+        "snd_pop": "噗",
+        "snd_alarm": "警报",
     },
 }
 
@@ -2784,6 +3000,8 @@ def run_gui():
                command=lambda: open_settings_dialog()).pack(side="left", padx=(6, 0))
     ttk.Button(top, text=tr("alerts_btn"),
                command=lambda: open_alerts_dialog()).pack(side="left", padx=(6, 0))
+    ttk.Button(top, text=tr("alerts_log_btn"),
+               command=lambda: open_alert_log_dialog()).pack(side="left", padx=(6, 0))
     ttk.Label(top, text=tr("lang_label")).pack(side="left", padx=(14, 2))
     # Названия языков — на родных языках: случайно выбравший китайский
     # всегда найдёт «Русский» / «English» в этом списке обратно
@@ -2856,7 +3074,11 @@ def run_gui():
     clients_ui = []            # по индексу клиента: его вкладки и окна каналов
     current_client = {"idx": 0}
     history = {}               # (индекс клиента, канал) -> список сообщений
+    txt_owner = {}             # виджет чата -> (индекс клиента, канал) — для ПКМ/подсветки
     alerted = {"tabs": set(), "clients": set()}   # подсвеченные красным сигналом
+    alert_state = {"sound": False}   # сигнал уже пикнул — обычный звук не нужен
+    import collections
+    alert_log = collections.deque(maxlen=200)   # журнал срабатываний сигналов
     entry_starts = {}          # виджет чата -> номера строк, с которых начинаются
                                # записи history (в том же порядке) — для ПКМ
 
@@ -3111,6 +3333,9 @@ def run_gui():
                 txt.tag_config("name", font=("Segoe UI", 10, "bold"))
                 txt.tag_config("orig", foreground="#777777")
                 txt.tag_config("err", foreground="#cc0000")
+                # упоминание имени персонажа — мягкий жёлтый фон сообщения
+                txt.tag_config("mention", background="#ffedad")
+                txt.tag_lower("mention")
                 bind_copy(txt)
                 txt.bind("<Button-3>", lambda e, idx=i, ch=name:
                          chat_context_menu(e, idx, ch))
@@ -3118,6 +3343,7 @@ def run_gui():
                 # pack разложил бы их полосами), видимый — через lift()
                 frame.place(relx=0, rely=0, relwidth=1, relheight=1)
                 tabs[name] = (txt, frame)
+                txt_owner[txt] = (i, name)
                 btn = tk.Label(tabbar, text=name, fg=TAB_FG, pady=3,
                                cursor="hand2", font=("Segoe UI", 8))
                 btn.bind("<Button-1>",
@@ -3198,6 +3424,13 @@ def run_gui():
         save_config(cfg)
         refresh_tab_marks()
 
+    def channel_sound_path(channel):
+        """Звук канала: выбор канала важнее общего; общий — встроенный звук
+        из настроек. Ничего не найдено — None (сигнал по умолчанию)."""
+        sid = (cfg.get("channel_sounds") or {}).get(channel) \
+            or cfg.get("sound") or "beep"
+        return resolve_sound_path(sid, cfg.get("sound_file") or "")
+
     def channel_tab_menu(event, client_idx, channel):
         """ПКМ по вкладке канала: разрешить/запретить звук и уведомления
         именно из этого канала."""
@@ -3216,6 +3449,28 @@ def run_gui():
                              command=lambda: apply("sound_channels", var_s))
         menu.add_checkbutton(label=tr("tab_menu_notify"), variable=var_n,
                              command=lambda: apply("notify_channels", var_n))
+
+        # выбор звука именно этого канала (важнее общего из настроек)
+        var_pick = tk.StringVar(
+            value=(cfg.get("channel_sounds") or {}).get(channel) or "")
+
+        def apply_sound():
+            sounds = dict(cfg.get("channel_sounds") or {})
+            pick = var_pick.get()
+            if pick:
+                sounds[channel] = pick
+            else:
+                sounds.pop(channel, None)      # «как общий» — запись не нужна
+            cfg["channel_sounds"] = sounds
+            save_config(cfg)
+
+        sub = tk.Menu(menu, tearoff=0)
+        sub.add_radiobutton(label=tr("sound_default"), variable=var_pick,
+                            value="", command=apply_sound)
+        for sid in BUILTIN_SOUNDS:
+            sub.add_radiobutton(label=tr(f"snd_{sid}"), variable=var_pick,
+                                value=sid, command=apply_sound)
+        menu.add_cascade(label=tr("tab_menu_sound_pick"), menu=sub)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -3269,11 +3524,18 @@ def run_gui():
         seq = reply_state["seq"]
         src, dst = reply_langs()
         try:
+            gl_terms = []
+            if src == "ru" and dst == "en":
+                # термины прячем до перевода: иначе Google коверкает их
+                # («вемп» -> «hemp»), а пост-замене не за что зацепиться
+                text, gl_terms = glossary_protect_ru(text)
             if src == dst:
                 result = text        # языки совпали — переводить нечего
             else:
                 result, _lang = translate_auto(text, dst=dst, src=src)
             if result:
+                if gl_terms:
+                    result = glossary_restore(result, gl_terms)
                 # игровые термины — принятыми словами, а не дословно;
                 # словарь знает только пару ru↔en
                 if dst == "en" and src == "ru":
@@ -3454,6 +3716,17 @@ def run_gui():
         # запоминаем строку, с которой начнётся запись — по ней ПКМ найдёт её
         start_line = int(str(txt.index("end-1c")).split(".")[0])
         entry_starts.setdefault(txt, []).append(start_line)
+        # упоминание имени персонажа этого клиента (кроме его же сообщений) —
+        # подсвечиваем, чтобы в шумном чате было видно «обратились ко мне»
+        mention = False
+        owner = txt_owner.get(txt)
+        if owner is not None and name:
+            cls = cfg.get("clients") or []
+            if owner[0] < len(cls):
+                pname = cls[owner[0]].get("name") or ""
+                if pname.strip().lower() != (name or "").strip().lower():
+                    mention = mentioned_in(original, pname) or \
+                        mentioned_in(translated or "", pname)
         if t:
             txt.insert("end", f"[{t}] ", "time")
         if name:
@@ -3475,6 +3748,8 @@ def run_gui():
         else:
             txt.insert("end", translated + "\n")    # только перевод
             txt.insert("end", "\n")
+        if mention:
+            txt.tag_add("mention", f"{start_line}.0", "end-1c")
 
     def tab_visible(client_idx, channel):
         return (client_idx == current_client["idx"]
@@ -3561,6 +3836,16 @@ def run_gui():
         fired = match_alert_rules(cfg.get("alerts"), channel, original,
                                   translated)
         if fired:
+            # в журнал — в любом случае, даже если звук/уведомление
+            # выключены: красная вкладка не всегда замечается вовремя
+            note0 = next((str(r.get("note")).strip() for r in fired
+                          if str(r.get("note") or "").strip()), "")
+            alert_log.append({
+                "at": time.strftime("%H:%M:%S"),
+                "client": client_idx,
+                "channel": channel,
+                "text": note0 or (translated or original)[:180],
+            })
             if (client_idx != current_client["idx"]
                     or channel != active_channel(client_idx)):
                 alerted["tabs"].add((client_idx, channel))
@@ -3572,7 +3857,8 @@ def run_gui():
             # выключены = сигнал молчит (красная подсветка вкладки остаётся)
             if any(r.get("sound") for r in fired) \
                     and channel_flag(cfg.get("sound_channels"), channel):
-                play_sound(cfg.get("sound_file") or None)
+                alert_state["sound"] = True    # обычный звук сообщения не дублируем
+                play_sound(channel_sound_path(channel))
             if any(r.get("notify") for r in fired) \
                     and channel_flag(cfg.get("notify_channels"), channel):
                 cls = cfg.get("clients") or []
@@ -3586,10 +3872,9 @@ def run_gui():
                 alert_text = note or (translated or original)[:180]
                 show_notification(f"{tr('alert_toast_title')} — {label}",
                                   alert_text)
-                if note:
-                    # свой текст уже показан — обычное уведомление с текстом
-                    # сообщения не выдаём
-                    return True
+                # уведомление о сигнале уже показано — обычное уведомление
+                # с текстом сообщения не выдаём (двойной тост не нужен)
+                return True
 
     def start():
         collect_cfg()
@@ -3705,13 +3990,15 @@ def run_gui():
                 if item[0] != "done":
                     continue
                 _, client_idx, channel, t, name, body, translated, src_lang = item
+                alert_state["sound"] = False
                 noted = append_to(client_idx, channel, t, name, body,
                                   translated, src_lang)
                 state["count"] = state.get("count", 0) + 1
                 status_var.set(tr("status_running", n=state["count"],
                                   backend=translator_status_text()))
-                if channel_flag(cfg.get("sound_channels"), channel):
-                    play_sound(cfg.get("sound_file") or None)
+                if channel_flag(cfg.get("sound_channels"), channel) \
+                        and not alert_state["sound"]:
+                    play_sound(channel_sound_path(channel))
                 if not noted \
                         and channel_flag(cfg.get("notify_channels"), channel):
                     cls = cfg.get("clients") or []
@@ -3802,12 +4089,28 @@ def run_gui():
         lang_var = tk.BooleanVar(value=bool(cfg.get("translate_lang_channels")))
         cur_var = tk.BooleanVar(value=bool(cfg.get("translate_currency", True)))
         copy_var = tk.BooleanVar(value=bool(cfg.get("auto_copy_reply", True)))
+        snd_ids = list(BUILTIN_SOUNDS)
+        snd_names = [tr(f"snd_{s}") for s in snd_ids]
+        cur_snd = cfg.get("sound") or "beep"
+        if cur_snd not in snd_ids:
+            cur_snd = "beep"
+        snd_var = tk.StringVar(value=snd_names[snd_ids.index(cur_snd)])
 
         def apply(*_args):
             cfg["translate_lang_channels"] = bool(lang_var.get())
             cfg["translate_currency"] = bool(cur_var.get())
             cfg["auto_copy_reply"] = bool(copy_var.get())
             save_config(cfg)
+
+        def apply_sound(_e=None):
+            cfg["sound"] = snd_ids[snd_names.index(snd_var.get())] \
+                if snd_var.get() in snd_names else "beep"
+            save_config(cfg)
+
+        def play_selected():
+            apply_sound()
+            play_sound(resolve_sound_path(cfg.get("sound") or "beep",
+                                          cfg.get("sound_file") or ""))
 
         ttk.Checkbutton(box, text=tr("opt_lang_channels"),
                         variable=lang_var, command=apply).pack(anchor="w",
@@ -3818,6 +4121,15 @@ def run_gui():
         ttk.Checkbutton(box, text=tr("opt_auto_copy"),
                         variable=copy_var, command=apply).pack(anchor="w",
                                                                pady=2)
+        snd_row = ttk.Frame(box)
+        snd_row.pack(anchor="w", pady=(6, 2), fill="x")
+        ttk.Label(snd_row, text=tr("opt_sound")).pack(side="left")
+        snd_combo = ttk.Combobox(snd_row, textvariable=snd_var, state="readonly",
+                                 width=16, values=snd_names)
+        snd_combo.pack(side="left", padx=(6, 4))
+        snd_combo.bind("<<ComboboxSelected>>", apply_sound)
+        ttk.Button(snd_row, text=tr("btn_play"),
+                   command=play_selected).pack(side="left")
         ttk.Label(box, text=tr("settings_hint"),
                   foreground="#777777", wraplength=380).pack(anchor="w",
                                                              pady=(10, 0))
@@ -4145,9 +4457,8 @@ def run_gui():
                     rules[i]["pattern"] = value
                     refill()
                     tree.selection_set(iid)
-                else:                # пустая подстрока — удалить правило
-                    del rules[i]
-                    refill()
+                # пустая подстрока — оставляем прежнее значение: опечатка
+                # при правке не должна молча удалять всё правило
             else:                    # «Текст уведомл.»: пусто = без текста
                 if value:
                     rules[i]["note"] = value
@@ -4258,11 +4569,54 @@ def run_gui():
         win.protocol("WM_DELETE_WINDOW", on_close)
         refill()
 
+    # ---------------- журнал срабатываний сигналов ----------------
+    def open_alert_log_dialog():
+        """Что и когда сработало: время, канал, текст. Двойной щелчок —
+        перейти к вкладке, где это прилетело."""
+        win = tk.Toplevel(root)
+        win.title(tr("alerts_log_title"))
+        win.geometry("560x320")
+        win.transient(root)
+        win.minsize(440, 240)
+
+        tree = ttk.Treeview(win, columns=("time", "channel", "text"),
+                            show="headings", height=12)
+        tree.heading("time", text=tr("alerts_log_col_time"))
+        tree.heading("channel", text=tr("alerts_log_col_channel"))
+        tree.heading("text", text=tr("alerts_log_col_text"))
+        tree.column("time", width=70, anchor="center")
+        tree.column("channel", width=110, anchor="w")
+        tree.column("text", width=330, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        for i, rec in enumerate(alert_log):
+            tree.insert("", "end", iid=str(i), values=(
+                rec["at"], rec["channel"], rec["text"][:120]))
+
+        if not alert_log:
+            ttk.Label(win, text=tr("alerts_log_empty"),
+                      foreground="#777777").pack(anchor="w", padx=8)
+
+        def jump(_event):
+            sel = tree.selection()
+            if not sel:
+                return
+            rec = alert_log[int(sel[0])]
+            if rec["client"] < len(clients_ui):
+                switch_client(rec["client"])
+                switch_tab(rec["client"], rec["channel"])
+                win.destroy()
+
+        tree.bind("<Double-Button-1>", jump)
+        ttk.Button(win, text=tr("btn_close"), command=win.destroy).pack(
+            anchor="e", padx=8, pady=(0, 8))
+
     def restart_gui():
         """Полный перезапуск окна: смена языка интерфейса.
 
-        Потоки слежения останавливаются, окно пересоздаётся с новым языком;
-        настройки к этому моменту уже сохранены в конфиг."""
+        Потоки слежения останавливаются, окно закрывается; main() по флагу
+        запустит run_gui заново с новым языком. Настройки к этому моменту
+        уже сохранены в конфиг."""
         log_debug("перезапуск GUI (смена языка)")
         stop_event.set()
         try:
@@ -4270,8 +4624,8 @@ def run_gui():
                 tray_icon[0].stop()
         except Exception:
             pass
+        _RESTART_REQUESTED["v"] = True
         root.destroy()
-        run_gui()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     clients_var.set(clients_summary())
@@ -4313,19 +4667,27 @@ def self_test():
         print(f"  [{'OK ' if good else 'FAIL'}] parse: {line!r} -> {got}")
     try:
         _tr, lang = translate_auto("good evening friends")
-        good = lang == "en" and _tr and "вечер" in _tr.lower()
-        ok &= good
-        backend = "mymemory" if GTX_LAST_ERROR == "429" else "gtx"
-        print(f"  [{'OK ' if good else 'FAIL'}] translate ({backend}): {_tr!r} ({lang})")
+        if not _tr:      # сети нет / сервисы лежат — не повод ронять самотест
+            print("  [WARN] translate: нет ответа от сервисов (сеть?) — "
+                  "проверка результата пропущена")
+        else:
+            good = lang == "en" and "вечер" in _tr.lower()
+            ok &= good
+            backend = "mymemory" if GTX_LAST_ERROR == "429" else "gtx"
+            print(f"  [{'OK ' if good else 'FAIL'}] translate ({backend}): {_tr!r} ({lang})")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] translate: {exc}")
     try:
         # явный исходный язык (панель ответа: ru → en)
         _tr2, lang2 = translate_auto("продам кедр и вемп за фавор", dst="en", src="ru")
-        good = bool(_tr2) and lang2 in ("ru", "auto")
-        ok &= good
-        print(f"  [{'OK ' if good else 'FAIL'}] translate src=ru→en: {_tr2!r} ({lang2})")
+        if not _tr2:
+            print("  [WARN] translate src=ru→en: нет ответа от сервисов (сеть?) — "
+                  "проверка результата пропущена")
+        else:
+            good = lang2 in ("ru", "auto")
+            ok &= good
+            print(f"  [{'OK ' if good else 'FAIL'}] translate src=ru→en: {_tr2!r} ({lang2})")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] translate src=ru: {exc}")
@@ -4363,9 +4725,38 @@ def self_test():
         good = got is not None and got.startswith("(Cad) Verkaufe")
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] trade wts (de): {got!r}")
+        # префикс без остатка: языковой хвост «(en)» не пририсовывается
+        got, _gl = translate_trade_body("WTS", dst="pt")
+        good = got == "Vendo" and _gl == "en"
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] trade префикс без хвоста: {got!r}")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] trade-префиксы: {exc}")
+    try:
+        # сообщение из одного <Имени>: переводить нечего, хвост «(lang)» не нужен
+        got, src = translate_preserving_names("<Solo>", "ru")
+        good = got == "<Solo>" and src is None
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] только имя без хвоста: {got!r} ({src})")
+        # обратная защита словаря (панель ответа ru→en): ru-термины в токены.
+        # «продам» тоже прячется — это запись wts→продам: в ответе получим
+        # живой «WTS», а не дословное «I will sell»
+        prot, terms = glossary_protect_ru("продам гвозди и вемп")
+        good = (len(terms) == 3
+                and not re.search(r"(?<![\w])гвозди(?![\w])", prot)
+                and not re.search(r"(?<![\w])вемп(?![\w])", prot))
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь защита ru→en: {prot!r}")
+        fake = "I sell " + terms[0][0] + " and " + terms[1][0]
+        restored = glossary_restore(fake, terms)
+        good = "nails" in restored and "wemp" in restored
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь восстановление ru→en: "
+              f"{restored!r}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] словарь ru→en: {exc}")
     try:
         got, src = preview_translation("уже русский текст без терминов", "ru")
         good = got == "уже русский текст без терминов" and src == "ru"
@@ -4429,6 +4820,19 @@ def self_test():
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] сигналы: антиспам (не чаще раза "
               f"в {ALERT_THROTTLE_SECONDS:.0f} с)")
+        # одинаковая подстрока в двух правилах: окна антиспама — у каждого своё
+        _dup = [
+            {"channels": ["Local"], "pattern": "complete the location details",
+             "enabled": True},
+            {"channels": ["Event"], "pattern": "complete the location details",
+             "enabled": True},
+        ]
+        _f1 = match_alert_rules(_dup, "Local", "complete the location details", None)
+        _f2 = match_alert_rules(_dup, "Event", "complete the location details", None)
+        good = len(_f1) == 1 and len(_f2) == 1
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: антиспам по правилу, "
+              f"не по подстроке")
         good = (len(DEFAULTS["alerts"]) == 1
                 and DEFAULTS["alerts"][0].get("channels") == ["Event"]
                 and DEFAULTS["alerts"][0].get("pattern")
@@ -4488,6 +4892,15 @@ def self_test():
         good = all(x in got for x in ("cedarwood", "wemp", "favour"))
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] словарь en: {got!r}")
+        # сортированный кэш живёт по mtime: внешняя правка файла подхватывается
+        _raw = glossary_raw_items()
+        glossary_save_items(_raw + [{"en": "zzzcacheprobe", "ru": "тесткэша"}])
+        _seen = [e[0] for e in _glossary_sorted_entries()]
+        good = "zzzcacheprobe" in _seen
+        glossary_save_items(_raw)          # возвращаем словарь как был
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] словарь: кэш инвалидируется "
+              f"по mtime файла")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] словарь: {exc}")
@@ -4512,10 +4925,14 @@ def self_test():
         # сквозная проверка через живой перевод: токен выдерживает Google
         prot, amounts = currency_protect("WTS rare sword 20s")
         _live, _l = translate_preserving_names(prot, "ru")
-        got = currency_restore(_live, amounts, "ru") if _live else None
-        good = bool(got) and "20 серебра" in got
-        ok &= good
-        print(f"  [{'OK ' if good else 'FAIL'}] валюта (live gtx): {got!r}")
+        if not _live:
+            print("  [WARN] валюта (live gtx): нет ответа от сервисов (сеть?) — "
+                  "проверка результата пропущена")
+        else:
+            got = currency_restore(_live, amounts, "ru")
+            good = "20 серебра" in got
+            ok &= good
+            print(f"  [{'OK ' if good else 'FAIL'}] валюта (live gtx): {got!r}")
         # опция «как есть»: токен возвращается в исходном виде
         prot, amounts = currency_protect("price 2g 50s 30c 40i")
         got = currency_restore(prot, amounts, None)
@@ -4548,6 +4965,39 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] валюта: {exc}")
+    # встроенные звуки: файлы на месте, все id резолвятся; свой файл важнее
+    try:
+        good = sounds_dir() is not None
+        for sid in BUILTIN_SOUNDS:
+            good = good and resolve_sound_path(sid) is not None
+        good = good and resolve_sound_path("no_such_sound") is None
+        # свой wav важнее встроенного
+        _custom = os.path.join(tempfile.gettempdir(), "wurm_probe.wav")
+        with open(resolve_sound_path("beep"), "rb") as src, \
+                open(_custom, "wb") as dst:
+            dst.write(src.read())
+        good = good and resolve_sound_path("beep", custom=_custom) == _custom
+        os.remove(_custom)
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] звуки: {len(BUILTIN_SOUNDS)} "
+              f"встроенных, папка: {sounds_dir()}")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] звуки: {exc}")
+    # упоминание имени: границы слова и регистр
+    try:
+        good = (mentioned_in("Uggabuga, come here!", "Uggabuga")
+                and mentioned_in("uggabuga приди", "Uggabuga")
+                and not mentioned_in("UggabugaSecond хай", "Uggabuga")
+                and not mentioned_in("привет всем", "Uggabuga")
+                and not mentioned_in("ку-ку", "")
+                and not mentioned_in(None, "Uggabuga"))
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] упоминание имени: границы "
+              f"слова, регистр, пустые значения")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] упоминание имени: {exc}")
     # i18n: у всех языков полный набор ключей, названия — на родных языках
     try:
         ref = set(I18N["ru"])
@@ -4622,7 +5072,11 @@ def main():
         time.sleep(1)
 
     try:
-        run_gui()
+        while True:             # смена языка интерфейса = новый круг
+            _RESTART_REQUESTED["v"] = False
+            run_gui()
+            if not _RESTART_REQUESTED["v"]:
+                break
     except Exception:
         # Фатальная ошибка mainloop — фиксируем, чтобы было что показать.
         log_debug("ФАТАЛЬНАЯ ОШИБКА GUI:\n" + traceback.format_exc())

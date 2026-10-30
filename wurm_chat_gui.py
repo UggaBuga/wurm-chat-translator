@@ -801,6 +801,65 @@ def layout_tab_rows(state):
         log_debug(f"tabs: ОШИБКА раскладки: {exc!r}")
 
 
+# --------------------------------------------------------------------------- #
+# Всплывающие подсказки (hover tooltip)
+# --------------------------------------------------------------------------- #
+_tooltip = {"win": None, "job": None, "anchor": None}
+
+
+def _tooltip_hide():
+    """Скрыть и уничтожить окно подсказки, отменить отложенный показ."""
+    win, job, anchor = _tooltip["win"], _tooltip["job"], _tooltip["anchor"]
+    _tooltip.update(win=None, job=None, anchor=None)
+    if job is not None and anchor is not None:
+        try:
+            anchor.after_cancel(job)
+        except Exception:
+            pass
+    if win is not None:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+
+def _tooltip_show(widget, text):
+    import tkinter as tk   # tkinter в модуле импортируется лениво
+    if _tooltip["win"] is not None or not text:
+        return
+    win = tk.Toplevel(widget)
+    win.wm_overrideredirect(True)
+    win.attributes("-topmost", True)
+    lbl = tk.Label(win, text=text, bg="#ffffe0", fg="#333333",
+                   font=("Segoe UI", 9), padx=6, pady=3,
+                   relief="solid", bd=1)
+    lbl.pack()
+    win.update_idletasks()
+    x = widget.winfo_rootx() + 10
+    y = widget.winfo_rooty() + widget.winfo_height() + 4
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    x = min(x, sw - win.winfo_width() - 8)
+    y = min(y, sh - win.winfo_height() - 8)
+    win.wm_geometry(f"+{max(0, x)}+{max(0, y)}")
+    _tooltip["win"] = win
+
+
+def widget_tooltip(widget, text_fn):
+    """Подсказка при наведении. text_fn — функция без аргументов: текст
+    запрашивается в момент показа, чтобы отражать текущее состояние."""
+    def on_enter(_event):
+        _tooltip_hide()
+        _tooltip["anchor"] = widget
+        _tooltip["job"] = widget.after(
+            500, lambda: _tooltip_show(widget, text_fn()))
+
+    def on_leave(_event):
+        _tooltip_hide()
+
+    widget.bind("<Enter>", on_enter)
+    widget.bind("<Leave>", on_leave)
+
+
 def rule_channels(rule):
     """Набор каналов правила: [] = любой. Понимает новый формат
     («channels»: список) и старый («channel»: строка)."""
@@ -1887,6 +1946,10 @@ I18N = {
         "chk_on_top": "Поверх окон",
         "tab_menu_sound": "Звук из этого канала",
         "tab_menu_notify": "Уведомления из этого канала",
+        "tab_tt_sound_on": "Звук на новые сообщения: вкл (клик — выкл)",
+        "tab_tt_sound_off": "Звук на новые сообщения: выкл (клик — вкл)",
+        "tab_tt_notify_on": "Всплывающие уведомления: вкл (клик — выкл)",
+        "tab_tt_notify_off": "Всплывающие уведомления: выкл (клик — вкл)",
         "reply_label": "Ответ:",
         "ctx_reply": "Ответить",
         "btn_start": "▶ Старт",
@@ -1994,6 +2057,10 @@ I18N = {
         "chk_on_top": "Always on top",
         "tab_menu_sound": "Sound from this channel",
         "tab_menu_notify": "Notifications from this channel",
+        "tab_tt_sound_on": "Sound on new messages: on (click to turn off)",
+        "tab_tt_sound_off": "Sound on new messages: off (click to turn on)",
+        "tab_tt_notify_on": "Popup notifications: on (click to turn off)",
+        "tab_tt_notify_off": "Popup notifications: off (click to turn on)",
         "reply_label": "Reply:",
         "ctx_reply": "Reply",
         "btn_start": "▶ Start",
@@ -2101,6 +2168,10 @@ I18N = {
         "chk_on_top": "Sempre visível",
         "tab_menu_sound": "Som deste canal",
         "tab_menu_notify": "Notificações deste canal",
+        "tab_tt_sound_on": "Som em novas mensagens: ativado (clique para desativar)",
+        "tab_tt_sound_off": "Som em novas mensagens: desativado (clique para ativar)",
+        "tab_tt_notify_on": "Notificações pop-up: ativadas (clique para desativar)",
+        "tab_tt_notify_off": "Notificações pop-up: desativadas (clique para ativar)",
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
@@ -2211,6 +2282,10 @@ I18N = {
         "chk_on_top": "Immer im Vordergrund",
         "tab_menu_sound": "Ton aus diesem Kanal",
         "tab_menu_notify": "Benachrichtigungen aus diesem Kanal",
+        "tab_tt_sound_on": "Ton bei neuen Nachrichten: an (Klick zum Ausschalten)",
+        "tab_tt_sound_off": "Ton bei neuen Nachrichten: aus (Klick zum Einschalten)",
+        "tab_tt_notify_on": "Pop-up-Benachrichtigungen: an (Klick zum Ausschalten)",
+        "tab_tt_notify_off": "Pop-up-Benachrichtigungen: aus (Klick zum Einschalten)",
         "reply_label": "Antwort:",
         "ctx_reply": "Antworten",
         "btn_start": "▶ Start",
@@ -2322,6 +2397,10 @@ I18N = {
         "chk_on_top": "Siempre visible",
         "tab_menu_sound": "Sonido de este canal",
         "tab_menu_notify": "Notificaciones de este canal",
+        "tab_tt_sound_on": "Sonido en mensajes nuevos: activado (clic para desactivar)",
+        "tab_tt_sound_off": "Sonido en mensajes nuevos: desactivado (clic para activar)",
+        "tab_tt_notify_on": "Notificaciones emergentes: activadas (clic para desactivar)",
+        "tab_tt_notify_off": "Notificaciones emergentes: desactivadas (clic para activar)",
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
@@ -2432,6 +2511,10 @@ I18N = {
         "chk_on_top": "Toujours au premier plan",
         "tab_menu_sound": "Son de ce canal",
         "tab_menu_notify": "Notifications de ce canal",
+        "tab_tt_sound_on": "Son pour nouveaux messages : activé (clic pour désactiver)",
+        "tab_tt_sound_off": "Son pour nouveaux messages : désactivé (clic pour activer)",
+        "tab_tt_notify_on": "Notifications pop-up : activées (clic pour désactiver)",
+        "tab_tt_notify_off": "Notifications pop-up : désactivées (clic pour activer)",
         "reply_label": "Réponse :",
         "ctx_reply": "Répondre",
         "btn_start": "▶ Démarrer",
@@ -2541,6 +2624,10 @@ I18N = {
         "chk_on_top": "置顶",
         "tab_menu_sound": "此频道的声音",
         "tab_menu_notify": "此频道的通知",
+        "tab_tt_sound_on": "新消息声音：开（点击关闭）",
+        "tab_tt_sound_off": "新消息声音：关（点击开启）",
+        "tab_tt_notify_on": "弹出通知：开（点击关闭）",
+        "tab_tt_notify_off": "弹出通知：关（点击开启）",
         "reply_label": "回复：",
         "ctx_reply": "回复",
         "btn_start": "▶ 开始",
@@ -3039,17 +3126,28 @@ def run_gui():
                          channel_tab_menu(e, idx, ch))
                 tab_buttons[name] = btn
                 # значки разрешений канала, всегда на вкладке: клик
-                # переключает вкл/выкл. Залитый — разрешено, перечёркнутый —
-                # нет. Свой шрифт: в Segoe UI этих символов нет. Отступ —
-                # только между каналами, а не между названием и значками.
-                ic_s = tk.Label(tabbar, text="🔊", cursor="hand2",
-                                font=("Segoe UI Emoji", 7))
+                # переключает вкл/выкл. Звук — нота ♪, уведомления — конверт
+                # ✉: одна гарнитура, один размер и одинаковые цвета (тёмный =
+                # вкл, серый = выкл). При наведении — подсказка с состоянием.
+                # Отступ — только между каналами.
+                ic_s = tk.Label(tabbar, text="♪", cursor="hand2",
+                                font=("Segoe UI Symbol", 9), fg="#b3b3b3")
                 ic_s.bind("<Button-1>", lambda _e, ch=name:
                           toggle_channel_flag("sound_channels", ch))
-                ic_n = tk.Label(tabbar, text="🔔", cursor="hand2",
-                                font=("Segoe UI Emoji", 7))
+                widget_tooltip(
+                    ic_s,
+                    lambda ch=name: tr("tab_tt_sound_on")
+                    if channel_flag(cfg.get("sound_channels"), ch)
+                    else tr("tab_tt_sound_off"))
+                ic_n = tk.Label(tabbar, text="✉", cursor="hand2",
+                                font=("Segoe UI Symbol", 9), fg="#b3b3b3")
                 ic_n.bind("<Button-1>", lambda _e, ch=name:
                           toggle_channel_flag("notify_channels", ch))
+                widget_tooltip(
+                    ic_n,
+                    lambda ch=name: tr("tab_tt_notify_on")
+                    if channel_flag(cfg.get("notify_channels"), ch)
+                    else tr("tab_tt_notify_off"))
                 tab_marks[name] = (ic_s, ic_n)
                 # в строку панели вкладок НЕ укладываем — раскладку по
                 # строкам (с переносом при нехватке ширины) делает
@@ -3079,17 +3177,17 @@ def run_gui():
                     100, lambda s=st: layout_tab_rows(s))
 
     def refresh_tab_marks():
-        """Значки разрешений на вкладках каналов: 🔊/🔇 звук, 🔔/🔕
-        уведомления. Залитый — разрешено, перечёркнутый — нет; по умолчанию
-        (списки пустые) — всё выключено."""
+        """Значки разрешений на вкладках каналов: нота ♪ — звук, конверт ✉ —
+        уведомления; одинаковые цвета: тёмный = вкл, серый = выкл. По
+        умолчанию (списки пустые) — всё выключено."""
         for ui in clients_ui:
             for name, icons in (ui.get("tab_marks") or {}).items():
                 ic_s, ic_n = icons
                 s_on = channel_flag(cfg.get("sound_channels"), name)
                 n_on = channel_flag(cfg.get("notify_channels"), name)
                 try:
-                    ic_s.config(text="🔊" if s_on else "🔇")
-                    ic_n.config(text="🔔" if n_on else "🔕")
+                    ic_s.config(text="♪", fg="#222222" if s_on else "#b3b3b3")
+                    ic_n.config(text="✉", fg="#222222" if n_on else "#b3b3b3")
                 except tk.TclError:
                     pass
 
@@ -3470,9 +3568,13 @@ def run_gui():
                 if ui["btn"] is not None:
                     alerted["clients"].add(client_idx)
                     ui["btn"].config(fg=TAB_FG_ALERT)
-            if any(r.get("sound") for r in fired):
+            # звук/уведомление сигнала — подчинены значкам канала: 🔊/🔔
+            # выключены = сигнал молчит (красная подсветка вкладки остаётся)
+            if any(r.get("sound") for r in fired) \
+                    and channel_flag(cfg.get("sound_channels"), channel):
                 play_sound(cfg.get("sound_file") or None)
-            if any(r.get("notify") for r in fired):
+            if any(r.get("notify") for r in fired) \
+                    and channel_flag(cfg.get("notify_channels"), channel):
                 cls = cfg.get("clients") or []
                 label = channel
                 if len(cls) > 1 and client_idx < len(cls):

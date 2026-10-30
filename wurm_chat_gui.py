@@ -725,6 +725,82 @@ def set_channel_flag(cfg, key, channel, on):
     cfg[key] = cur
 
 
+def on_tabbar_configure(state):
+    """Изменилась ширина панели вкладок — запланировать перенос вкладок
+    на строки (дебаунс: не чаще раза в 50 мс)."""
+    import tkinter as tk   # tkinter в модуле импортируется лениво
+    width = state["bar"].winfo_width()
+    if width == state.get("width"):
+        return
+    state["width"] = width
+    job = state.get("job")
+    if job is not None:
+        try:
+            state["bar"].after_cancel(job)
+        except tk.TclError:
+            pass
+    state["job"] = state["bar"].after(50, lambda: layout_tab_rows(state))
+
+
+def layout_tab_rows(state):
+    """Жадно раскладываем вкладки (название + значки) по строкам панели:
+    не поместившиеся в ширину окна уходят на строку ниже."""
+    import tkinter as tk   # tkinter в модуле импортируется лениво
+    state["job"] = None
+    bar, groups = state["bar"], state["groups"]
+    if not groups:
+        return
+    try:
+        bar.update_idletasks()
+        width = bar.winfo_width()
+    except tk.TclError as exc:
+        log_debug(f"tabs: layout отменён (TclError): {exc!r}")
+        return
+    if width < 20:   # панель ещё не отрисована — ждём следующего Configure
+        if not state.get("retried"):
+            state["retried"] = True
+            log_debug("tabs: ширина панели <20, ждём отрисовки")
+        state["job"] = bar.after(100, lambda: layout_tab_rows(state))
+        return
+    state["retried"] = False
+    pad = 10   # 5 слева от названия + 5 справа от значков
+    sizes = [b.winfo_reqwidth() + s.winfo_reqwidth()
+             + n.winfo_reqwidth() + pad for b, s, n in groups]
+    plan, cur, x = [], [], 0
+    for gi, gw in enumerate(sizes):
+        if cur and x + gw > width:
+            plan.append(cur)
+            cur, x = [], 0
+        cur.append(gi)
+        x += gw
+    if cur:
+        plan.append(cur)
+    try:
+        rows = state["rows"]
+        while len(rows) < len(plan):
+            rows.append(tk.Frame(bar))
+        for ri, row in enumerate(rows):
+            if ri < len(plan):
+                if not row.winfo_ismapped():
+                    row.pack(fill="x")
+            else:
+                row.pack_forget()
+        for ri, idxs in enumerate(plan):
+            row = rows[ri]
+            for gi in idxs:
+                b, s, n = groups[gi]
+                b.pack(in_=row, side="left", padx=(5, 0))
+                s.pack(in_=row, side="left")
+                n.pack(in_=row, side="left", padx=(0, 5))
+        # ВАЖНО: pack(in_=) не меняет ни родителя, ни порядок наложения.
+        # Строки созданы ПОСЛЕ кнопок и лежат выше них в стеке панели —
+        # пустые строки закрашивают кнопки. Опускаем строки вниз стека.
+        for row in rows[:len(plan)]:
+            row.lower()
+    except tk.TclError as exc:
+        log_debug(f"tabs: ОШИБКА раскладки: {exc!r}")
+
+
 def rule_channels(rule):
     """Набор каналов правила: [] = любой. Понимает новый формат
     («channels»: список) и старый («channel»: строка)."""
@@ -2930,6 +3006,10 @@ def run_gui():
                 cbtn = None
             tabbar = tk.Frame(cframe)
             tabbar.pack(fill="x")
+            tab_state = {"bar": tabbar, "groups": [], "rows": [],
+                         "width": 0, "job": None}
+            tabbar.bind("<Configure>",
+                        lambda _e, s=tab_state: on_tabbar_configure(s))
             content = ttk.Frame(cframe)
             content.pack(fill="both", expand=True, pady=(2, 0))
             tabs = {}
@@ -2953,7 +3033,6 @@ def run_gui():
                 tabs[name] = (txt, frame)
                 btn = tk.Label(tabbar, text=name, fg=TAB_FG, pady=3,
                                cursor="hand2", font=("Segoe UI", 8))
-                btn.pack(side="left", padx=(5, 0))
                 btn.bind("<Button-1>",
                          lambda _e, n=name, idx=i: switch_tab(idx, n))
                 btn.bind("<Button-3>", lambda e, idx=i, ch=name:
@@ -2965,17 +3044,20 @@ def run_gui():
                 # только между каналами, а не между названием и значками.
                 ic_s = tk.Label(tabbar, text="🔊", cursor="hand2",
                                 font=("Segoe UI Emoji", 7))
-                ic_s.pack(side="left")
                 ic_s.bind("<Button-1>", lambda _e, ch=name:
                           toggle_channel_flag("sound_channels", ch))
                 ic_n = tk.Label(tabbar, text="🔔", cursor="hand2",
                                 font=("Segoe UI Emoji", 7))
-                ic_n.pack(side="left", padx=(0, 5))
                 ic_n.bind("<Button-1>", lambda _e, ch=name:
                           toggle_channel_flag("notify_channels", ch))
                 tab_marks[name] = (ic_s, ic_n)
+                # в строку панели вкладок НЕ укладываем — раскладку по
+                # строкам (с переносом при нехватке ширины) делает
+                # layout_tab_rows()
+                tab_state["groups"].append((btn, ic_s, ic_n))
             clients_ui.append({"btn": cbtn, "frame": cframe, "tabs": tabs,
                                "tab_buttons": tab_buttons, "tab_marks": tab_marks,
+                               "tab_state": tab_state,
                                "current": {"name": CHANNELS[0][0]}})
         current_client["idx"] = 0
         # у каждого клиента поднять его активную вкладку канала — иначе
@@ -2989,11 +3071,17 @@ def run_gui():
             for ch in clients_ui[i]["tabs"]:
                 rebuild_channel(i, ch)
         refresh_tab_marks()
+        # первоначальная раскладка вкладок по строкам (дальше — по Configure)
+        for ui in clients_ui:
+            st = ui.get("tab_state")
+            if st:
+                st["job"] = st["bar"].after(
+                    100, lambda s=st: layout_tab_rows(s))
 
     def refresh_tab_marks():
         """Значки разрешений на вкладках каналов: 🔊/🔇 звук, 🔔/🔕
-        уведомления. Залитый — разрешено, перечёркнутый — нет; пока списки
-        не настраивали (None) — всё разрешено."""
+        уведомления. Залитый — разрешено, перечёркнутый — нет; по умолчанию
+        (списки пустые) — всё выключено."""
         for ui in clients_ui:
             for name, icons in (ui.get("tab_marks") or {}).items():
                 ic_s, ic_n = icons

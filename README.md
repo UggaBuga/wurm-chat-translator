@@ -46,6 +46,14 @@
 
 ## Что нового
 
+**[v1.7.5.4](../../releases/tag/v1.7.5.4)** — переключатели звука и уведомлений переехали на вкладки каналов: 🔊 и 🔔 на каждой вкладке включают звук/уведомления именно для этого канала (залитый = включено), общие галочки убраны. Состояние сохраняется между запусками, по умолчанию всё выключено.
+
+**[v1.7.5.3](../../releases/tag/v1.7.5.3)** — состояние всех галочек запоминается сразу при переключении и восстанавливается при запуске.
+
+**[v1.7.5.2](../../releases/tag/v1.7.5.2)** — у сигнала появилось поле «Текст уведомления»: если оно заполнено, всплывает оно, а не текст сообщения.
+
+**[v1.7.5.1](../../releases/tag/v1.7.5.1)** — исправлены звук и всплывающие уведомления сигналов (собственный сигнал вместо системного бипа, тосты отображаются поверх игры).
+
 **[v1.7.5](../../releases/tag/v1.7.5)** — оптимизация: обрезка истории чата стала инкрементальной (в оживлённых каналах после 1000 сообщений больше нет полной перерисовки вкладки на каждое сообщение), наблюдатель логов пропускает неизменённые файлы по mtime.
 
 **[v1.7.4](../../releases/tag/v1.7.4)** — сигналы на сообщения: правило может следить сразу за несколькими каналами (пустой список = любой); выбор каналов — выпадающий чек-лист прямо в ячейке, без всплывающих окон.
@@ -141,6 +149,14 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.5.4](../../releases/tag/v1.7.5.4)** — os interruptores de som e notificações mudaram para as abas dos canais: 🔊 e 🔔 em cada aba ativam som/notificações apenas para aquele canal (preenchido = ativado), as caixas de seleção gerais foram removidas. O estado é salvo entre execuções, por padrão tudo desligado.
+
+**[v1.7.5.3](../../releases/tag/v1.7.5.3)** — o estado de todas as caixas de seleção é salvo imediatamente ao alternar e restaurado na inicialização.
+
+**[v1.7.5.2](../../releases/tag/v1.7.5.2)** — o alerta ganhou o campo «Texto da notificação»: se preenchido, é ele quem aparece, e não o texto da mensagem.
+
+**[v1.7.5.1](../../releases/tag/v1.7.5.1)** — corrigidos o som e as notificações dos alertas (sinal próprio no lugar do bip do sistema, toasts aparecem por cima do jogo).
 
 **[v1.7.5](../../releases/tag/v1.7.5)** — otimização: o corte do histórico do chat ficou incremental (em canais movimentados após 1000 mensagens não há mais redesenho da aba inteira a cada mensagem), e o observador de logs ignora arquivos sem alteração pelo mtime.
 

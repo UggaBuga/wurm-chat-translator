@@ -34,6 +34,7 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -50,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.5.4"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -594,6 +595,34 @@ def strip_log_prefix(line):
 # Звук и уведомления (из оригинального скрипта)
 # --------------------------------------------------------------------------- #
 
+def _ensure_default_beep_wav():
+    """Генерирует заметный двухтональный WAV во временной папке (если ещё нет).
+    MessageBeep часто неслышен (схема звуков «Без звука»), поэтому играем
+    свой синтезированный сигнал."""
+    import math
+    import struct
+    import wave
+    path = os.path.join(tempfile.gettempdir(), "wurm_chat_beep.wav")
+    if os.path.isfile(path):
+        return path
+    rate = 22050
+    duration = 0.35
+    n = int(rate * duration)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        frames = bytearray()
+        for i in range(n):
+            t = i / rate
+            freq = 880.0 if t < duration / 2 else 1320.0
+            env = min(1.0, t / 0.01, (duration - t) / 0.05)
+            sample = int(12000 * env * math.sin(2 * math.pi * freq * t))
+            frames += struct.pack("<h", sample)
+        w.writeframes(bytes(frames))
+    return path
+
+
 def play_sound(sound_path=None):
     system = platform.system()
     try:
@@ -616,11 +645,16 @@ def play_sound(sound_path=None):
         else:
             if system == "Windows":
                 import winsound
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                try:
+                    winsound.PlaySound(
+                        _ensure_default_beep_wav(),
+                        winsound.SND_FILENAME | winsound.SND_ASYNC)
+                except Exception:
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
             else:
                 print("\a", end="", flush=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_debug(f"play_sound: {exc}")
 
 
 def show_notification(title, message):
@@ -629,20 +663,22 @@ def show_notification(title, message):
     system = platform.system()
     try:
         if system == "Windows":
-            ps = f"""
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
-$xml = @\\"
-<toast><visual><binding template="ToastGeneric">
-    <text>{title}</text>
-    <text>{message}</text>
-</binding></visual></toast>
-\\"@
-$doc = New-Object Windows.Data.Xml.Dom.XmlDocument
-$doc.LoadXml($xml)
-$toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("WurmChatGUI").Show($toast)
-"""
+            xml_str = (
+                '<toast><visual><binding template="ToastGeneric">'
+                f'<text>{title}</text><text>{message}</text>'
+                '</binding></visual></toast>')
+            ps = (
+                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null\n"
+                "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null\n"
+                f"$xml = '{xml_str}'\n"
+                "$doc = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
+                "$doc.LoadXml($xml)\n"
+                "$toast = [Windows.UI.Notifications.ToastNotification]::new($doc)\n"
+                # AUMID обязан быть зарегистрирован в Windows (ярлык в меню
+                # «Пуск»), иначе тост молча не показывается. Свой «WurmChatGUI»
+                # не зарегистрирован — отправляем от имени PowerShell.
+                "$appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'\n"
+                "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)\n")
             creationflags = 0
             if hasattr(subprocess, "CREATE_NO_WINDOW"):
                 creationflags = subprocess.CREATE_NO_WINDOW  # не мигать консолью
@@ -668,6 +704,25 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
 # --------------------------------------------------------------------------- #
 ALERT_THROTTLE_SECONDS = 10.0   # антиспам: правило не чаще раза в N секунд
 _alert_last_fired = {}          # (channel, pattern) -> time.monotonic()
+
+
+def channel_flag(value, channel):
+    """Разрешён ли канал для звука/уведомлений: только если он в списке.
+    Отсутствие ключа или None — ничего не разрешено (по умолчанию тихо)."""
+    if not value:
+        return False
+    return channel in value
+
+
+def set_channel_flag(cfg, key, channel, on):
+    """Включить/выключить канал в списке разрешённых на звук/уведомления."""
+    names = [name for name, _, _ in CHANNELS]
+    cur = [c for c in (cfg.get(key) or []) if c in names]
+    if on and channel not in cur:
+        cur.append(channel)
+    if not on and channel in cur:
+        cur.remove(channel)
+    cfg[key] = cur
 
 
 def rule_channels(rule):
@@ -1602,8 +1657,6 @@ class TranslateWorker(threading.Thread):
 DEFAULTS = {
     "clients": [],           # список {"name", "path"} — по клиенту на копию игры
     "translate": True,
-    "sound": False,
-    "notify": False,
     "on_top": False,
     "show_original": False,
     "sound_file": "",
@@ -1613,6 +1666,8 @@ DEFAULTS = {
     "translate_lang_channels": False,  # переводить языковые чаты («Russian GL»)
     "translate_currency": True,        # «20s» → «20 серебра»; выкл — как есть
     "auto_copy_reply": True,           # перевод ответа — сразу в буфер обмена
+    "sound_channels": [],   # каналы со звуком на новые сообщения (иконка 🔊)
+    "notify_channels": [],  # каналы с уведомлениями на новые сообщения (🔔)
     "alerts": [],                      # сигналы: channels/pattern/enabled/...
 }
 # Сигнал по умолчанию: фраза археологии «можно копать центр бывшего дида»
@@ -1623,6 +1678,7 @@ DEFAULTS = {
 DEFAULTS["alerts"] = [{
     "channels": ["Event"],
     "pattern": "complete the location details",
+    "note": "обнаружен центр поселения с сундучком, иди ищи и копай",
     "enabled": True, "sound": True, "notify": True}]
 
 
@@ -1720,6 +1776,7 @@ I18N = {
         "alerts_col_pattern": "Подстрока",
         "alerts_col_sound": "Звук",
         "alerts_col_notify": "Уведомл.",
+        "alerts_col_note": "Текст уведомл.",
         "alert_any": "Любой",
         "alerts_channel": "Канал:",
         "alerts_pattern": "Подстрока:",
@@ -1735,7 +1792,9 @@ I18N = {
                        "Вкладка подсвечивается красным; одно правило не "
                        "срабатывает чаще раза в 10 секунд. Щелчок по ✓/— "
                        "переключает флажок, по каналу открывает список выбора "
-                       "каналов, двойной щелчок по подстроке — правка.",
+                       "каналов, двойной щелчок по подстроке или тексту "
+                       "уведомления — правка. Свой текст в уведомлении: "
+                       "показывается вместо текста сообщения.",
         "alert_toast_title": "Сигнал",
         "settings_title": "Настройки перевода",
         "opt_lang_channels": "Переводить языковые чаты (Russian GL, English GL, …)",
@@ -1750,6 +1809,8 @@ I18N = {
         "chk_notify": "Уведомления",
         "chk_original": "Оригинал",
         "chk_on_top": "Поверх окон",
+        "tab_menu_sound": "Звук из этого канала",
+        "tab_menu_notify": "Уведомления из этого канала",
         "reply_label": "Ответ:",
         "ctx_reply": "Ответить",
         "btn_start": "▶ Старт",
@@ -1824,6 +1885,7 @@ I18N = {
         "alerts_col_pattern": "Substring",
         "alerts_col_sound": "Sound",
         "alerts_col_notify": "Notify",
+        "alerts_col_note": "Notify text",
         "alert_any": "Any",
         "alerts_channel": "Channel:",
         "alerts_pattern": "Substring:",
@@ -1854,6 +1916,8 @@ I18N = {
         "chk_notify": "Notifications",
         "chk_original": "Original",
         "chk_on_top": "Always on top",
+        "tab_menu_sound": "Sound from this channel",
+        "tab_menu_notify": "Notifications from this channel",
         "reply_label": "Reply:",
         "ctx_reply": "Reply",
         "btn_start": "▶ Start",
@@ -1928,6 +1992,7 @@ I18N = {
         "alerts_col_pattern": "Subcadeia",
         "alerts_col_sound": "Som",
         "alerts_col_notify": "Notif.",
+        "alerts_col_note": "Texto notif.",
         "alert_any": "Qualquer",
         "alerts_channel": "Canal:",
         "alerts_pattern": "Subcadeia:",
@@ -1958,6 +2023,8 @@ I18N = {
         "chk_notify": "Notificações",
         "chk_original": "Original",
         "chk_on_top": "Sempre visível",
+        "tab_menu_sound": "Som deste canal",
+        "tab_menu_notify": "Notificações deste canal",
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
@@ -2034,6 +2101,7 @@ I18N = {
         "alerts_col_pattern": "Teilstring",
         "alerts_col_sound": "Ton",
         "alerts_col_notify": "Benachr.",
+        "alerts_col_note": "Benachr.-Text",
         "alert_any": "Jeder",
         "alerts_channel": "Kanal:",
         "alerts_pattern": "Teilstring:",
@@ -2065,6 +2133,8 @@ I18N = {
         "chk_notify": "Benachrichtigungen",
         "chk_original": "Original",
         "chk_on_top": "Immer im Vordergrund",
+        "tab_menu_sound": "Ton aus diesem Kanal",
+        "tab_menu_notify": "Benachrichtigungen aus diesem Kanal",
         "reply_label": "Antwort:",
         "ctx_reply": "Antworten",
         "btn_start": "▶ Start",
@@ -2144,6 +2214,7 @@ I18N = {
         "alerts_col_pattern": "Subcadena",
         "alerts_col_sound": "Sonido",
         "alerts_col_notify": "Notif.",
+        "alerts_col_note": "Texto de notif.",
         "alert_any": "Cualquiera",
         "alerts_channel": "Canal:",
         "alerts_pattern": "Subcadena:",
@@ -2173,6 +2244,8 @@ I18N = {
         "chk_notify": "Notificaciones",
         "chk_original": "Original",
         "chk_on_top": "Siempre visible",
+        "tab_menu_sound": "Sonido de este canal",
+        "tab_menu_notify": "Notificaciones de este canal",
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
@@ -2250,6 +2323,7 @@ I18N = {
         "alerts_col_pattern": "Sous-chaîne",
         "alerts_col_sound": "Son",
         "alerts_col_notify": "Notif.",
+        "alerts_col_note": "Texte notif.",
         "alert_any": "Tous",
         "alerts_channel": "Canal :",
         "alerts_pattern": "Sous-chaîne :",
@@ -2280,6 +2354,8 @@ I18N = {
         "chk_notify": "Notifications",
         "chk_original": "Original",
         "chk_on_top": "Toujours au premier plan",
+        "tab_menu_sound": "Son de ce canal",
+        "tab_menu_notify": "Notifications de ce canal",
         "reply_label": "Réponse :",
         "ctx_reply": "Répondre",
         "btn_start": "▶ Démarrer",
@@ -2359,6 +2435,7 @@ I18N = {
         "alerts_col_pattern": "子串",
         "alerts_col_sound": "声音",
         "alerts_col_notify": "通知",
+        "alerts_col_note": "通知文本",
         "alert_any": "任意",
         "alerts_channel": "频道：",
         "alerts_pattern": "子串：",
@@ -2386,6 +2463,8 @@ I18N = {
         "chk_notify": "通知",
         "chk_original": "原文",
         "chk_on_top": "置顶",
+        "tab_menu_sound": "此频道的声音",
+        "tab_menu_notify": "此频道的通知",
         "reply_label": "回复：",
         "ctx_reply": "回复",
         "btn_start": "▶ 开始",
@@ -2570,24 +2649,33 @@ def run_gui():
     # ---------------- панель флагов ----------------
     flags = ttk.Frame(root)
     flags.pack(fill="x", padx=8, pady=2)
+
+    def flag_toggled(key, var):
+        """Галочка изменена — запоминаем сразу: состояние не должно
+        зависеть от корректного выхода (приложение могут просто убить)."""
+        cfg[key] = bool(var.get())
+        save_config(cfg)
+
     tr_var = tk.BooleanVar(value=cfg["translate"])
     ttk.Checkbutton(flags, text=tr("chk_translate",
                                     lang=LANG_OBJ[UI_LANG][target_lang]),
-                    variable=tr_var).pack(side="left")
-    snd_var = tk.BooleanVar(value=cfg["sound"])
-    ttk.Checkbutton(flags, text=tr("chk_sound"),
-                    variable=snd_var).pack(side="left", padx=8)
-    ntf_var = tk.BooleanVar(value=cfg["notify"])
-    ttk.Checkbutton(flags, text=tr("chk_notify"),
-                    variable=ntf_var).pack(side="left")
+                    variable=tr_var,
+                    command=lambda: flag_toggled("translate", tr_var)) \
+        .pack(side="left")
     orig_var = tk.BooleanVar(value=cfg["show_original"])
     ttk.Checkbutton(flags, text=tr("chk_original"),
-                    variable=orig_var).pack(side="left", padx=8)
+                    variable=orig_var,
+                    command=lambda: flag_toggled("show_original", orig_var)) \
+        .pack(side="left", padx=8)
     top_var = tk.BooleanVar(value=cfg["on_top"])
     top_chk = ttk.Checkbutton(flags, text=tr("chk_on_top"), variable=top_var)
     top_chk.pack(side="left")
     root.attributes("-topmost", cfg["on_top"])
-    top_chk.config(command=lambda: root.attributes("-topmost", top_var.get()))
+
+    def toggle_on_top():
+        root.attributes("-topmost", top_var.get())
+        flag_toggled("on_top", top_var)
+    top_chk.config(command=toggle_on_top)
 
     # ---------------- вкладки-окна каналов ----------------
     # Два уровня вкладок: верхний — клиенты (по одному на каждую копию игры,
@@ -2846,6 +2934,7 @@ def run_gui():
             content.pack(fill="both", expand=True, pady=(2, 0))
             tabs = {}
             tab_buttons = {}
+            tab_marks = {}
             for name, _, _ in CHANNELS:
                 frame = ttk.Frame(content)
                 txt = scrolledtext.ScrolledText(frame, wrap="word", state="disabled",
@@ -2862,14 +2951,31 @@ def run_gui():
                 # pack разложил бы их полосами), видимый — через lift()
                 frame.place(relx=0, rely=0, relwidth=1, relheight=1)
                 tabs[name] = (txt, frame)
-                btn = tk.Label(tabbar, text=name, fg=TAB_FG, padx=8, pady=3,
-                               cursor="hand2", font=("Segoe UI", 9))
-                btn.pack(side="left")
+                btn = tk.Label(tabbar, text=name, fg=TAB_FG, pady=3,
+                               cursor="hand2", font=("Segoe UI", 8))
+                btn.pack(side="left", padx=(5, 0))
                 btn.bind("<Button-1>",
                          lambda _e, n=name, idx=i: switch_tab(idx, n))
+                btn.bind("<Button-3>", lambda e, idx=i, ch=name:
+                         channel_tab_menu(e, idx, ch))
                 tab_buttons[name] = btn
+                # значки разрешений канала, всегда на вкладке: клик
+                # переключает вкл/выкл. Залитый — разрешено, перечёркнутый —
+                # нет. Свой шрифт: в Segoe UI этих символов нет. Отступ —
+                # только между каналами, а не между названием и значками.
+                ic_s = tk.Label(tabbar, text="🔊", cursor="hand2",
+                                font=("Segoe UI Emoji", 7))
+                ic_s.pack(side="left")
+                ic_s.bind("<Button-1>", lambda _e, ch=name:
+                          toggle_channel_flag("sound_channels", ch))
+                ic_n = tk.Label(tabbar, text="🔔", cursor="hand2",
+                                font=("Segoe UI Emoji", 7))
+                ic_n.pack(side="left", padx=(0, 5))
+                ic_n.bind("<Button-1>", lambda _e, ch=name:
+                          toggle_channel_flag("notify_channels", ch))
+                tab_marks[name] = (ic_s, ic_n)
             clients_ui.append({"btn": cbtn, "frame": cframe, "tabs": tabs,
-                               "tab_buttons": tab_buttons,
+                               "tab_buttons": tab_buttons, "tab_marks": tab_marks,
                                "current": {"name": CHANNELS[0][0]}})
         current_client["idx"] = 0
         # у каждого клиента поднять его активную вкладку канала — иначе
@@ -2882,6 +2988,52 @@ def run_gui():
         for i in range(len(clients_ui)):
             for ch in clients_ui[i]["tabs"]:
                 rebuild_channel(i, ch)
+        refresh_tab_marks()
+
+    def refresh_tab_marks():
+        """Значки разрешений на вкладках каналов: 🔊/🔇 звук, 🔔/🔕
+        уведомления. Залитый — разрешено, перечёркнутый — нет; пока списки
+        не настраивали (None) — всё разрешено."""
+        for ui in clients_ui:
+            for name, icons in (ui.get("tab_marks") or {}).items():
+                ic_s, ic_n = icons
+                s_on = channel_flag(cfg.get("sound_channels"), name)
+                n_on = channel_flag(cfg.get("notify_channels"), name)
+                try:
+                    ic_s.config(text="🔊" if s_on else "🔇")
+                    ic_n.config(text="🔔" if n_on else "🔕")
+                except tk.TclError:
+                    pass
+
+    def toggle_channel_flag(key, channel):
+        """Клик по значку вкладки: вкл/выкл звука или уведомлений канала."""
+        set_channel_flag(cfg, key, channel,
+                         not channel_flag(cfg.get(key), channel))
+        save_config(cfg)
+        refresh_tab_marks()
+
+    def channel_tab_menu(event, client_idx, channel):
+        """ПКМ по вкладке канала: разрешить/запретить звук и уведомления
+        именно из этого канала."""
+        menu = tk.Menu(root, tearoff=0)
+        var_s = tk.BooleanVar(
+            value=channel_flag(cfg.get("sound_channels"), channel))
+        var_n = tk.BooleanVar(
+            value=channel_flag(cfg.get("notify_channels"), channel))
+
+        def apply(key, var):
+            set_channel_flag(cfg, key, channel, bool(var.get()))
+            save_config(cfg)
+            refresh_tab_marks()
+
+        menu.add_checkbutton(label=tr("tab_menu_sound"), variable=var_s,
+                             command=lambda: apply("sound_channels", var_s))
+        menu.add_checkbutton(label=tr("tab_menu_notify"), variable=var_n,
+                             command=lambda: apply("notify_channels", var_n))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     # ---------------- панель ответа (перевод в обе стороны) ----------------
     reply = ttk.Frame(root)
@@ -3100,8 +3252,6 @@ def run_gui():
         cfg.update({
             "clients": list(cfg.get("clients") or []),
             "translate": tr_var.get(),
-            "sound": snd_var.get(),
-            "notify": ntf_var.get(),
             "show_original": orig_var.get(),
             "on_top": top_var.get(),
             "translate_lang_channels": bool(cfg.get("translate_lang_channels")),
@@ -3240,8 +3390,16 @@ def run_gui():
                 if len(cls) > 1 and client_idx < len(cls):
                     label = (f"{cls[client_idx].get('name') or tr('client_default', n=client_idx + 1)}"
                              f" · {channel}")
+                # заданный в правиле текст уведомления важнее текста сообщения
+                note = next((str(r.get("note")).strip() for r in fired
+                             if str(r.get("note") or "").strip()), "")
+                alert_text = note or (translated or original)[:180]
                 show_notification(f"{tr('alert_toast_title')} — {label}",
-                                  (translated or original)[:180])
+                                  alert_text)
+                if note:
+                    # свой текст уже показан — обычное уведомление с текстом
+                    # сообщения не выдаём
+                    return True
 
     def start():
         collect_cfg()
@@ -3357,13 +3515,15 @@ def run_gui():
                 if item[0] != "done":
                     continue
                 _, client_idx, channel, t, name, body, translated, src_lang = item
-                append_to(client_idx, channel, t, name, body, translated, src_lang)
+                noted = append_to(client_idx, channel, t, name, body,
+                                  translated, src_lang)
                 state["count"] = state.get("count", 0) + 1
                 status_var.set(tr("status_running", n=state["count"],
                                   backend=translator_status_text()))
-                if snd_var.get():
+                if channel_flag(cfg.get("sound_channels"), channel):
                     play_sound(cfg.get("sound_file") or None)
-                if ntf_var.get():
+                if not noted \
+                        and channel_flag(cfg.get("notify_channels"), channel):
                     cls = cfg.get("clients") or []
                     label = channel
                     if len(cls) > 1 and client_idx < len(cls):
@@ -3587,9 +3747,9 @@ def run_gui():
         «Закрыть» = сохранить в конфиг."""
         win = tk.Toplevel(root)
         win.title(tr("alerts_title"))
-        win.geometry("640x340")
+        win.geometry("800x340")
         win.transient(root)
-        win.minsize(540, 300)
+        win.minsize(660, 300)
 
         rules = [dict(r) for r in (cfg.get("alerts") or [])
                  if isinstance(r, dict)]
@@ -3598,18 +3758,20 @@ def run_gui():
         table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
         tree = ttk.Treeview(table_frame,
                             columns=("on", "channel", "pattern", "sound",
-                                     "notify"),
+                                     "notify", "note"),
                             show="headings", height=8, selectmode="browse")
         tree.heading("on", text=tr("alerts_col_on"))
         tree.heading("channel", text=tr("alerts_col_channel"))
         tree.heading("pattern", text=tr("alerts_col_pattern"))
         tree.heading("sound", text=tr("alerts_col_sound"))
         tree.heading("notify", text=tr("alerts_col_notify"))
+        tree.heading("note", text=tr("alerts_col_note"))
         tree.column("on", width=40, anchor="center")
-        tree.column("channel", width=140, anchor="w")
-        tree.column("pattern", width=250, anchor="w")
-        tree.column("sound", width=60, anchor="center")
-        tree.column("notify", width=80, anchor="center")
+        tree.column("channel", width=130, anchor="w")
+        tree.column("pattern", width=210, anchor="w")
+        tree.column("sound", width=55, anchor="center")
+        tree.column("notify", width=75, anchor="center")
+        tree.column("note", width=190, anchor="w")
         scroll = ttk.Scrollbar(table_frame, orient="vertical",
                                command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
@@ -3639,7 +3801,8 @@ def run_gui():
                     channel_text(r),
                     r.get("pattern", ""),
                     mark(bool(r.get("sound"))),
-                    mark(bool(r.get("notify")))))
+                    mark(bool(r.get("notify"))),
+                    r.get("note", "")))
 
         # -------- выпадающий чек-лист каналов прямо в ячейке «Канал» --------
         # По щелчку под ячейкой раскрывается список «☑ Любой / ☐ Local…».
@@ -3766,8 +3929,9 @@ def run_gui():
 
         tree.bind("<Button-1>", on_click)
 
-        # -------- правка подстроки прямо в ячейке --------
-        edit_state = {"widget": None, "iid": None}
+        # -------- правка текста прямо в ячейке («Подстрока», «Текст уведомл.») --------
+        TEXT_COLS = {"pattern": "pattern", "note": "note"}
+        edit_state = {"widget": None, "iid": None, "key": None}
 
         def commit_edit(_e=None):
             wdg = edit_state["widget"]
@@ -3775,34 +3939,46 @@ def run_gui():
                 return
             value = wdg.get().strip()
             iid = edit_state["iid"]
+            key = edit_state["key"]
             edit_state["widget"] = None
             edit_state["iid"] = None
+            edit_state["key"] = None
             # уничтожать виджет изнутри его же события нельзя — через idle
             win.after_idle(wdg.destroy)
-            if iid is None:
+            if iid is None or key is None:
                 return
             i = int(iid)
             if i >= len(rules):
                 return
-            if value:
-                rules[i]["pattern"] = value
+            if key == "pattern":
+                if value:
+                    rules[i]["pattern"] = value
+                    refill()
+                    tree.selection_set(iid)
+                else:                # пустая подстрока — удалить правило
+                    del rules[i]
+                    refill()
+            else:                    # «Текст уведомл.»: пусто = без текста
+                if value:
+                    rules[i]["note"] = value
+                else:
+                    rules[i].pop("note", None)
                 refill()
                 tree.selection_set(iid)
-            else:                    # пустая подстрока — удалить правило
-                del rules[i]
-                refill()
             autosave()
 
         def cancel_edit(_e=None):
             wdg = edit_state["widget"]
             edit_state["widget"] = None
             edit_state["iid"] = None
+            edit_state["key"] = None
             if wdg is not None:
                 win.after_idle(wdg.destroy)
 
-        def open_cell_editor(iid):
-            """Открыть поле ввода поверх ячейки «Подстрока»."""
-            bbox = tree.bbox(iid, "pattern")
+        def open_cell_editor(iid, col):
+            """Поле ввода поверх ячейки «Подстрока»/«Текст уведомл.»."""
+            key = TEXT_COLS[col]
+            bbox = tree.bbox(iid, col)
             if not bbox:
                 return
             x, y, w, h = bbox
@@ -3810,9 +3986,9 @@ def run_gui():
             # bbox относительно tree — пересчитываем в координаты рамки
             entry.place(x=x + tree.winfo_x(), y=y + tree.winfo_y(),
                         width=w, height=h)
-            entry.insert(0, rules[int(iid)].get("pattern", ""))
+            entry.insert(0, rules[int(iid)].get(key, ""))
             entry.select_range(0, "end")
-            edit_state.update(widget=entry, iid=iid)
+            edit_state.update(widget=entry, iid=iid, key=key)
             entry.bind("<Return>", commit_edit)
             entry.bind("<FocusOut>", on_focus_out)
             entry.bind("<Escape>", cancel_edit)
@@ -3843,9 +4019,10 @@ def run_gui():
             col_id = tree.identify_column(event.x)
             if not iid or not col_id:
                 return
-            if tree["columns"][int(col_id[1:]) - 1] != "pattern":
+            col = tree["columns"][int(col_id[1:]) - 1]
+            if col not in TEXT_COLS:
                 return
-            open_cell_editor(iid)
+            open_cell_editor(iid, col)
 
         tree.bind("<Double-Button-1>", start_edit)
 
@@ -3853,12 +4030,13 @@ def run_gui():
             if edit_state["widget"] is not None:
                 commit_edit()
             rules.append({"channels": [], "pattern": "",
-                          "enabled": True, "sound": True, "notify": False})
+                          "enabled": True, "sound": True, "notify": False,
+                          "note": ""})
             refill()
             iid = str(len(rules) - 1)
             tree.see(iid)
             tree.selection_set(iid)
-            open_cell_editor(iid)      # сразу вводим подстроку
+            open_cell_editor(iid, "pattern")   # сразу вводим подстроку
 
         def remove_rule():
             if edit_state["widget"] is not None:
@@ -4065,12 +4243,28 @@ def self_test():
                 and DEFAULTS["alerts"][0].get("channels") == ["Event"]
                 and DEFAULTS["alerts"][0].get("pattern")
                     == "complete the location details"
+                and DEFAULTS["alerts"][0].get("note")
                 and DEFAULTS["alerts"][0].get("enabled")
                 and DEFAULTS["alerts"][0].get("sound")
                 and DEFAULTS["alerts"][0].get("notify"))
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] сигналы: дефолтный сигнал "
               f"археологии (Event): {len(DEFAULTS['alerts'])}")
+        # разрешения каналов на звук/уведомления
+        c = {}
+        good = not channel_flag(None, "Local") \
+            and not channel_flag([], "Trade")
+        set_channel_flag(c, "sound_channels", "Trade", True)
+        good = good and channel_flag(c["sound_channels"], "Trade") \
+            and not channel_flag(c["sound_channels"], "Local")
+        set_channel_flag(c, "sound_channels", "Trade", False)
+        good = good and not channel_flag(c["sound_channels"], "Trade")
+        set_channel_flag(c, "notify_channels", "Event", True)
+        good = good and channel_flag(c["notify_channels"], "Event") \
+            and not channel_flag(c["notify_channels"], "Village")
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] сигналы: разрешения каналов "
+              f"(звук/уведомления)")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] сигналы: {exc}")

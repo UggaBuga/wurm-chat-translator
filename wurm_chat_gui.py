@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.6.1"
+APP_VERSION = "1.7.6.3"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -2048,6 +2048,8 @@ I18N = {
                        "уведомления — правка. Свой текст в уведомлении: "
                        "показывается вместо текста сообщения.",
         "alert_toast_title": "Сигнал",
+        "lastalert_title": "Последнее оповещение",
+        "lastalert_jump": "К сообщению",
         "settings_title": "Настройки перевода",
         "opt_lang_channels": "Переводить языковые чаты (Russian GL, English GL, …)",
         "opt_currency": "Переводить денежные единицы (20s → 20 серебра)",
@@ -2178,6 +2180,8 @@ I18N = {
                        "click Sound to pick a signal (or turn it off), "
                        "double-click the substring to edit.",
         "alert_toast_title": "Alert",
+        "lastalert_title": "Last alert",
+        "lastalert_jump": "Jump to message",
         "settings_title": "Translation settings",
         "opt_lang_channels": "Translate language channels (Russian GL, English GL, …)",
         "opt_auto_copy": "Automatically copy the reply translation to the clipboard",
@@ -2308,6 +2312,8 @@ I18N = {
                        "escolher um sinal da coleção (ou desligar); duplo "
                        "clique na subcadeia para editar.",
         "alert_toast_title": "Alerta",
+        "lastalert_title": "Último alerta",
+        "lastalert_jump": "Ir para a mensagem",
         "settings_title": "Configurações de tradução",
         "opt_auto_copy": "Copiar automaticamente a tradução da resposta para a área de transferência",
         "opt_lang_channels": "Traduzir chats de idiomas (Russian GL, English GL, …)",
@@ -2441,6 +2447,8 @@ I18N = {
                        "Sound-Sammlung (oder schaltet ab), Doppelklick auf "
                        "den Teilstring bearbeitet ihn.",
         "alert_toast_title": "Signal",
+        "lastalert_title": "Letzter Alarm",
+        "lastalert_jump": "Zur Nachricht",
         "opt_auto_copy": "Übersetzte Antwort automatisch in die Zwischenablage kopieren",
         "settings_title": "Übersetzungseinstellungen",
         "opt_lang_channels": "Sprach-Chats übersetzen (Russian GL, English GL, …)",
@@ -2577,6 +2585,8 @@ I18N = {
                        "colección (o apagarla); doble clic en la subcadena "
                        "para editar.",
         "alert_toast_title": "Alerta",
+        "lastalert_title": "Última alerta",
+        "lastalert_jump": "Ir al mensaje",
         "settings_title": "Ajustes de traducción",
         "opt_lang_channels": "Traducir chats de idiomas (Russian GL, English GL, …)",
         "opt_currency": "Traducir unidades monetarias (20s → 20 plata)",
@@ -2710,6 +2720,8 @@ I18N = {
                        "choisir un signal de la collection (ou le couper) ; "
                        "double-cliquez sur la sous-chaîne pour l'éditer.",
         "alert_toast_title": "Alerte",
+        "lastalert_title": "Dernière alerte",
+        "lastalert_jump": "Aller au message",
         "settings_title": "Paramètres de traduction",
         "opt_lang_channels": "Traduire les canaux de langue (Russian GL, English GL, …)",
         "opt_currency": "Traduire les unités monétaires (20s → 20 argent)",
@@ -2841,6 +2853,8 @@ I18N = {
                        "单击 ✓/— 切换，单击频道打开频道选择列表，单击「声音」"
                        "从声音收藏中选择提示音（或关闭），双击子串进行编辑。",
         "alert_toast_title": "提醒",
+        "lastalert_title": "最新提醒",
+        "lastalert_jump": "转到消息",
         "settings_title": "翻译设置",
         "opt_lang_channels": "翻译语言频道（Russian GL、English GL 等）",
         "opt_currency": "翻译货币单位（20s → 20 银）",
@@ -3873,12 +3887,13 @@ def run_gui():
             # выключены: красная вкладка не всегда замечается вовремя
             note0 = next((str(r.get("note")).strip() for r in fired
                           if str(r.get("note") or "").strip()), "")
-            alert_log.append({
+            rec = {
                 "at": time.strftime("%H:%M:%S"),
                 "client": client_idx,
                 "channel": channel,
                 "text": note0 or (translated or original)[:180],
-            })
+            }
+            alert_log.append(rec)
             if (client_idx != current_client["idx"]
                     or channel != active_channel(client_idx)):
                 alerted["tabs"].add((client_idx, channel))
@@ -3886,15 +3901,16 @@ def run_gui():
                 if ui["btn"] is not None:
                     alerted["clients"].add(client_idx)
                     ui["btn"].config(fg=TAB_FG_ALERT)
-            # звук/уведомление сигнала — подчинены значкам канала: 🔊/🔔
-            # выключены = сигнал молчит (красная подсветка вкладки остаётся)
-            if any(r.get("sound") for r in fired) \
-                    and channel_flag(cfg.get("sound_channels"), channel):
+            # Сигналы превыше всего: звук и уведомление срабатывают всегда,
+            # когда в правиле стоит ✓ — значки каналов (🔊/🔔) на них не
+            # действуют, они управляют лишь обычными звуками сообщений.
+            if any(r.get("sound") for r in fired):
                 alert_state["sound"] = True    # обычный звук сообщения не дублируем
                 play_sound(rule_sound_path(fired, channel_sound_path(channel),
                                            cfg.get("sound_file") or ""))
-            if any(r.get("notify") for r in fired) \
-                    and channel_flag(cfg.get("notify_channels"), channel):
+                # звук пропищал — покажем, что это было
+                show_last_alert(rec)
+            if any(r.get("notify") for r in fired):
                 cls = cfg.get("clients") or []
                 label = channel
                 if len(cls) > 1 and client_idx < len(cls):
@@ -3906,6 +3922,7 @@ def run_gui():
                 alert_text = note or (translated or original)[:180]
                 show_notification(f"{tr('alert_toast_title')} — {label}",
                                   alert_text)
+                show_last_alert(rec)
                 # уведомление о сигнале уже показано — обычное уведомление
                 # с текстом сообщения не выдаём (двойной тост не нужен)
                 return True
@@ -4690,6 +4707,68 @@ def run_gui():
         tree.bind("<Double-Button-1>", jump)
         ttk.Button(win, text=tr("btn_close"), command=win.destroy).pack(
             anchor="e", padx=8, pady=(0, 8))
+
+    # ---------------- окно последнего оповещения ----------------
+    # Пропищал звук — а что случилось? Небольшое окошко в правом нижнем
+    # углу экрана: время, клиент, канал и текст сигнала. Само закрывается
+    # через несколько секунд; новый сигнал обновляет окно и таймер.
+    last_alert_ui = {"win": None, "job": None, "rec": None}
+
+    def close_last_alert():
+        last_alert_ui["job"] = None
+        win = last_alert_ui["win"]
+        last_alert_ui["win"] = None
+        if win is not None and win.winfo_exists():
+            win.destroy()
+
+    def jump_last_alert():
+        rec = last_alert_ui.get("rec")
+        if rec is None or rec["client"] >= len(clients_ui):
+            close_last_alert()
+            return
+        switch_client(rec["client"])
+        switch_tab(rec["client"], rec["channel"])
+        close_last_alert()
+
+    def show_last_alert(rec):
+        """rec: at/client/channel/text — создать окно или обновить в нём."""
+        win = last_alert_ui["win"]
+        if win is None or not win.winfo_exists():
+            win = tk.Toplevel(root)
+            win.title(tr("lastalert_title"))
+            win.transient(root)        # без отдельной кнопки в панели задач
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+            body = ttk.Frame(win, padding=10)
+            body.pack(fill="both", expand=True)
+            head = ttk.Label(body, font=("", 10, "bold"), wraplength=340)
+            head.pack(anchor="w")
+            text_lbl = ttk.Label(body, wraplength=340, justify="left")
+            text_lbl.pack(anchor="w", pady=(6, 0))
+            btns = ttk.Frame(body)
+            btns.pack(anchor="e", pady=(8, 0))
+            ttk.Button(btns, text=tr("lastalert_jump"),
+                       command=jump_last_alert).pack(side="left")
+            ttk.Button(btns, text=tr("btn_close"),
+                       command=close_last_alert).pack(side="left", padx=(6, 0))
+            win.update_idletasks()
+            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            win.geometry(f"+{max(0, sw - w - 24)}+{max(0, sh - h - 72)}")
+            last_alert_ui.update(win=win, head=head, text=text_lbl)
+        cls = cfg.get("clients") or []
+        cname = ""
+        if len(cls) > 1 and rec["client"] < len(cls):
+            cname = cls[rec["client"]].get("name") \
+                or tr("client_default", n=rec["client"] + 1)
+        label = f"{rec['at']} · {cname} · {rec['channel']}" if cname \
+            else f"{rec['at']} · {rec['channel']}"
+        last_alert_ui["head"].config(text=label)
+        last_alert_ui["text"].config(text=rec["text"])
+        last_alert_ui["rec"] = rec
+        if last_alert_ui["job"] is not None:
+            root.after_cancel(last_alert_ui["job"])
+        last_alert_ui["job"] = root.after(15000, close_last_alert)
 
     def restart_gui():
         """Полный перезапуск окна: смена языка интерфейса.

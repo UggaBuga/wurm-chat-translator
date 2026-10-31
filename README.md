@@ -46,6 +46,10 @@
 
 ## Что нового
 
+**[v1.7.6.1](../../releases/tag/v1.7.6.1)** — у каждого сигнала можно выбрать свой звук: щелчок по ячейке «Звук» в «Сигналах» открывает список «Выкл. / Как у канала / шесть встроенных звуков»; свой звук правила важнее канального, выбор сохраняется сразу.
+
+**[v1.7.6.0](../../releases/tag/v1.7.6.0)** — журнал срабатываний сигналов (двойной щелчок по записи — переход к сообщению); подсветка сообщений с именем игрока; встроенная коллекция из 6 звуков с выбором на канал.
+
 **[v1.7.5.4](../../releases/tag/v1.7.5.4)** — переключатели звука и уведомлений переехали на вкладки каналов: 🔊 и 🔔 на каждой вкладке включают звук/уведомления именно для этого канала (залитый = включено), общие галочки убраны. Состояние сохраняется между запусками, по умолчанию всё выключено.
 
 **[v1.7.5.3](../../releases/tag/v1.7.5.3)** — состояние всех галочек запоминается сразу при переключении и восстанавливается при запуске.
@@ -149,6 +153,10 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.6.1](../../releases/tag/v1.7.6.1)** — cada alerta pode ter som próprio: clique na célula «Som» em «Sinais» abre a lista «Desligado / Como o canal / seis sons embutidos»; o som próprio do alerta tem prioridade sobre o do canal, a escolha é salva imediatamente.
+
+**[v1.7.6.0](../../releases/tag/v1.7.6.0)** — registro de disparos dos alertas (duplo clique — ir para a mensagem); destaque das mensagens com o nome do jogador; coleção embutida de 6 sons com escolha por canal.
 
 **[v1.7.5.4](../../releases/tag/v1.7.5.4)** — os interruptores de som e notificações mudaram para as abas dos canais: 🔊 e 🔔 em cada aba ativam som/notificações apenas para aquele canal (preenchido = ativado), as caixas de seleção gerais foram removidas. O estado é salvo entre execuções, por padrão tudo desligado.
 

@@ -46,6 +46,8 @@
 
 ## Что нового
 
+**[v1.7.6.3](../../releases/tag/v1.7.6.3)** — окно последнего оповещения: при каждом срабатывании сигнала в правом нижнем углу всплывает окно с временем, каналом и текстом (кнопка «К сообщению» — переход на вкладку); сигналы теперь пробиваются всегда — их звук и уведомление не зависят от значков каналов, те управляют только обычными сообщениями.
+
 **[v1.7.6.1](../../releases/tag/v1.7.6.1)** — у каждого сигнала можно выбрать свой звук: щелчок по ячейке «Звук» в «Сигналах» открывает список «Выкл. / Как у канала / шесть встроенных звуков»; свой звук правила важнее канального, выбор сохраняется сразу.
 
 **[v1.7.6.0](../../releases/tag/v1.7.6.0)** — журнал срабатываний сигналов (двойной щелчок по записи — переход к сообщению); подсветка сообщений с именем игрока; встроенная коллекция из 6 звуков с выбором на канал.
@@ -153,6 +155,8 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.6.3](../../releases/tag/v1.7.6.3)** — janela do último alerta: a cada disparo de um sinal abre-se no canto inferior direito uma janela com a hora, o canal e o texto (botão «Ir para a mensagem» leva até a aba); os sinais agora passam sempre — seu som e notificação não dependem dos ícones dos canais, que controlam apenas as mensagens comuns.
 
 **[v1.7.6.1](../../releases/tag/v1.7.6.1)** — cada alerta pode ter som próprio: clique na célula «Som» em «Sinais» abre a lista «Desligado / Como o canal / seis sons embutidos»; o som próprio do alerta tem prioridade sobre o do canal, a escolha é salva imediatamente.
 

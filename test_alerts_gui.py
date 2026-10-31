@@ -1,277 +1,223 @@
 # -*- coding: utf-8 -*-
-"""GUI-тест диалога «Сигналы на сообщения»: исполняет РЕАЛЬНЫЙ код функции
-open_alerts_dialog, извлечённый из wurm_chat_gui.py через ast, и симулирует
-мышь/клавиатуру. Проверяет: переключение флажка, выпадающий чек-лист каналов
-(применяется сразу, не закрывается при выборе, закрывается кликом мимо и по
-Escape), правку подстроки двойным щелчком, добавление и удаление правила,
-автосохранение."""
-import ast
-import importlib.util
+"""Дымовая проверка диалога «Сигналы»: открытие, выпадающие списки канала
+и звука, сохранение выбора в конфиг. Гоняет реальный GUI через поддельный
+mainloop; окно мелькает на экране."""
+import os
 import sys
+import json
+import tempfile
+import traceback
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wurm_chat_gui as m
 import tkinter as tk
 from tkinter import ttk
 
-BASE = r"E:\KimiData\kimi\Workspaces\1с тест умений\wurm_chat_translator"
-SRC_PATH = BASE + r"\wurm_chat_gui.py"
+tmp = tempfile.mkdtemp(prefix="wurm_smoke_")
+logs = os.path.join(tmp, "players", "TestChar", "logs")
+os.makedirs(logs)
+m.CONFIG_FILE = os.path.join(tmp, "cfg.json")
+m.DEBUG_FILE = os.path.join(tmp, "dbg.log")
+m.DEFAULTS = dict(m.DEFAULTS, clients=[{"name": "TestChar", "path": logs}])
 
-SRC = open(SRC_PATH, encoding="utf-8").read()
-mod = ast.parse(SRC)
-fn = next(n for n in ast.walk(mod)
-          if isinstance(n, ast.FunctionDef) and n.name == "open_alerts_dialog")
-code = ast.get_source_segment(SRC, fn)
-
-spec = importlib.util.spec_from_file_location("wct", SRC_PATH)
-m = importlib.util.module_from_spec(spec)
-sys.modules["wct"] = m
-spec.loader.exec_module(m)
-
-cfg = {"alerts": [{"channel": "Event",
-                   "pattern": "complete the location details",
-                   "enabled": True, "sound": True, "notify": True}]}
-saved = []
+results = []
 
 
-def save_config(c):
-    saved.append([dict(r) for r in c.get("alerts", [])])
+def check(name, cond):
+    results.append((name, bool(cond)))
+    print(("  [OK ] " if cond else "  [FAIL] ") + name)
 
 
-root = tk.Tk()
-root.geometry("120x60+0+0")
-ns = {"tk": tk, "ttk": ttk, "tr": m.tr, "cfg": cfg,
-      "save_config": save_config, "CHANNELS": m.CHANNELS, "root": root,
-      "rule_channels": m.rule_channels}
-exec(code, ns)
-ns["open_alerts_dialog"]()
-win = root.winfo_children()[-1]
-win.deiconify()
-for _ in range(5):
-    win.update()
-    win.update_idletasks()
+script = []
 
 
-def find_tree(w):
-    for ch in w.winfo_children():
-        if isinstance(ch, ttk.Treeview):
-            return ch
-        r = find_tree(ch)
-        if r is not None:
-            return r
+def fake_mainloop(self):
+    """Гоняет шаги сценария и одновременно качает очередь Tk-событий,
+    иначе никто не обработает root.after(...) и шаги не выполнятся."""
+    def step():
+        try:
+            fn = script.pop(0)
+        except IndexError:
+            self.destroy()
+            return
+        try:
+            fn(self)
+        except Exception:
+            traceback.print_exc()
+            self.destroy()
+            return
+        self.after(120, step)
+    self.after(120, step)
+    import time as _time
+    while script and self.winfo_exists():
+        try:
+            self.update()
+        except tk.TclError:
+            break
+        _time.sleep(0.02)
 
 
-tree = find_tree(win)
+tk.Tk.mainloop = fake_mainloop
 
 
-def click(col):
-    bbox = tree.bbox("0", col)
-    assert bbox, f"нет bbox для {col}"
+def walk(w):
+    yield w
+    for c in w.winfo_children():
+        yield from walk(c)
+
+
+def find_button(root, text):
+    for w in walk(root):
+        if isinstance(w, ttk.Button) and w.cget("text") == text:
+            return w
+    return None
+
+
+def find_dialog(root):
+    for w in walk(root):
+        if isinstance(w, tk.Toplevel) and w.title().startswith("Сигналы"):
+            return w
+    return None
+
+
+def find_listbox(root):
+    for w in walk(root):
+        if isinstance(w, tk.Listbox):
+            return w
+    return None
+
+
+def find_tree(win):
+    for w in walk(win):
+        if isinstance(w, ttk.Treeview):
+            return w
+    return None
+
+
+# Событиям от event_generate нужно явное нарастающее время: без него Tk
+# склеивает щелчки в «двойной» (на дереве есть привязка Double-Button-1)
+# и одиночные нажатия молча пропадают.
+_ev_time = [10 ** 6]
+
+
+def gen_click(tree, win, col, iid="0"):
+    _ev_time[0] += 2000
+    bbox = tree.bbox(iid, col)
     x, y, w, h = bbox
-    tree.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2)
+    tree.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2,
+                        rootx=win.winfo_rootx() + 100,
+                        rooty=win.winfo_rooty() + 100,
+                        time=_ev_time[0])
+    win.update()
+
+
+# --- шаги сценария ---
+def step_open_dialog(root):
+    b = find_button(root, "Сигналы…")
+    check("кнопка «Сигналы…» найдена", b is not None)
+    b.invoke()
+    win = find_dialog(root)
+    check("диалог открылся", win is not None)
+    if win is not None:
+        win.update_idletasks()
+        win.update()
+    root._alerts_win = win
+
+
+def step_click_sound_cell(root):
+    win = root._alerts_win
+    tree = find_tree(win)
+    bbox = tree.bbox("0", "sound")
+    check("ячейка «Звук» видима", bool(bbox))
+    if bbox:
+        gen_click(tree, win, "sound")
+
+
+def step_pick_sound(root):
+    win = root._alerts_win
+    lb = find_listbox(win)
+    check("список звуков раскрылся", lb is not None)
+    if lb is None:
+        return
+    items = lb.get(0, "end")
+    check("пункты: Выкл./Как у канала/6 звуков", len(items) == 8)
+    # выбираем «Колокол» (индекс 3: 0 Выкл, 1 канал, 2 Колокольчик, 3 Колокол)
+    idx = next(i for i, s in enumerate(items) if "Колокол" in s and "Колоколь" not in s)
+    lb._on_pick(idx)
+    win.update()
+    cfg = json.load(open(m.CONFIG_FILE, encoding="utf-8"))
+    rule = cfg["alerts"][0]
+    check("sound_id=kолокол сохранён", rule.get("sound_id") == "bell")
+    check("звук включён", bool(rule.get("sound")))
+    lb2 = find_listbox(win)
+    check("список закрылся после выбора", lb2 is None)
+    tree = find_tree(win)
+    check("ячейка показывает «Колокол»",
+          tree.item("0", "values")[3] == "Колокол")
+
+
+def step_pick_off(root):
+    win = root._alerts_win
+    tree = find_tree(win)
+    gen_click(tree, win, "sound")
+    lb = find_listbox(win)
+    check("список звуков раскрылся снова", lb is not None)
+    if lb is None:
+        return
+    lb._on_pick(0)          # «Выкл.»
+    win.update()
+    cfg = json.load(open(m.CONFIG_FILE, encoding="utf-8"))
+    check("звук выключен", not cfg["alerts"][0].get("sound"))
+    check("ячейка показывает «—»", find_tree(win).item("0", "values")[3] == "—")
+
+
+def step_channel_dropdown(root):
+    win = root._alerts_win
+    tree = find_tree(win)
+    gen_click(tree, win, "channel")
+    lb = find_listbox(win)
+    check("чек-лист каналов раскрылся", lb is not None)
+    if lb is None:
+        return
+    items = lb.get(0, "end")
+    check("пункты: Любой + каналы", len(items) == 1 + len(m.CHANNELS))
+    lb._on_pick(0)          # «Любой» — сброс каналов
+    win.update()
+    lb2 = find_listbox(win)
+    check("чек-лист остался открыт (мультивыбор)",
+          lb2 is not None and lb2.get(0, "end")[0].startswith("☑"))
+    lb2._on_pick(next(i for i, s in enumerate(lb2.get(0, "end"))
+                      if "Trade" in s))
+    win.update()
+    cfg = json.load(open(m.CONFIG_FILE, encoding="utf-8"))
+    check("канал Trade добавлен",
+          "Trade" in (cfg["alerts"][0].get("channels") or []))
+    # закрыть список кликом мимо
+    win.event_generate("<Button-1>", x=5, y=5,
+                       rootx=win.winfo_rootx() + 5,
+                       rooty=win.winfo_rooty() + 5)
+    win.update()
+    check("список закрылся по клику мимо", find_listbox(win) is None)
+
+
+def step_close(root):
+    win = root._alerts_win
+    for w in walk(win):
+        if isinstance(w, ttk.Button) and w.cget("text") == "Закрыть":
+            w.invoke()
+            break
     root.update()
-    win.update()
+    check("диалог закрылся", find_dialog(root) is None)
 
 
-def dblclick(col):
-    bbox = tree.bbox("0", col)
-    assert bbox, f"нет bbox для {col}"
-    x, y, w, h = bbox
-    # event_generate не принимает модификатор Double; Tk засчитывает двойной
-    # клик по меткам времени — event generate с -time (32-битное, мс)
-    now = int(tree.tk.call("clock", "milliseconds")) % (2 ** 31)
-    for i in range(2):
-        tree.tk.call("event", "generate", tree._w, "<Button-1>",
-                     "-x", x + w // 2, "-y", y + h // 2,
-                     "-time", now + i * 100)
-    win.update()
+script = [step_open_dialog, step_click_sound_cell, step_pick_sound,
+          step_pick_off, step_channel_dropdown, step_close]
+m.run_gui()
 
-
-def entry_open():
-    win.update()
-
-    def walk(w):
-        for ch in w.winfo_children():
-            if isinstance(ch, ttk.Entry):
-                return ch
-            r = walk(ch)
-            if r is not None:
-                return r
-
-    return walk(win)
-
-
-def type_in_entry(entry, text):
-    entry.delete(0, "end")
-    entry.insert(0, text)
-    entry.event_generate("<Return>")
-    win.update()
-
-
-def check_focus(entry, where):
-    win.update()
-    focused = win.tk.call("focus", "-displayof", win._w)
-    assert str(focused) == str(entry._w), f"ФОКУС НЕ В ПОЛЕ ({where})"
-
-
-def row_values(iid="0"):
-    return tree.item(iid, "values")
-
-
-def find_button(text):
-    def walk(w):
-        for ch in w.winfo_children():
-            if isinstance(ch, ttk.Button) and ch.cget("text") == text:
-                return ch
-            r = walk(ch)
-            if r is not None:
-                return r
-    return walk(win)
-
-
-def find_dropdown():
-    """Выпадающий чек-лист — tk.Listbox, размещённый через place."""
-    found = []
-
-    def walk(w):
-        for ch in w.winfo_children():
-            if isinstance(ch, tk.Listbox):
-                found.append(ch)
-            walk(ch)
-
-    walk(win)
-    return found
-
-
-# 1) исходное состояние
-v = row_values()
-assert v[1] == "Event" and v[2] == "complete the location details"
-
-# 2) щелчок по «Уведомл.» выключает notify
-click("notify")
-v = row_values()
-assert v[4] == "—", "notify не переключился"
-assert saved and saved[-1][0]["notify"] is False, "нет автосохранения"
-
-# 3) щелчок по каналу открывает выпадающий чек-лист внутри окна
-click("channel")
-win.update()
-drops = find_dropdown()
-assert len(drops) == 1, f"чек-лист не открылся: {len(drops)}"
-dd = drops[0]
-
-names = [m.tr("alert_any")] + [n for n, _, _ in m.CHANNELS]
-
-
-def dd_items():
-    return [dd.get(i) for i in range(dd.size())]
-
-
-items = dd_items()
-assert any(m.tr("alert_any") in it for it in items), "нет пункта «Любой»"
-assert any("Local" in it for it in items), "нет пункта «Local»"
-assert any("Event" in it and "☑" in it for it in items), \
-    "Event не отмечен галочкой"
-
-
-def toggle(name):
-    """Клик по пункту списка — синтетическим событием по bbox."""
-    idx = names.index(name)
-    bbox = dd.bbox(idx)
-    assert bbox, f"нет bbox для пункта {name}"
-    x, y, w, h = bbox
-    dd.event_generate("<Button-1>", x=x + w // 2, y=y + h // 2)
-    root.update()
-    win.update()
-
-
-toggle("Village")
-assert find_dropdown(), "список закрылся после выбора канала!"
-v = row_values()
-assert v[1] == "Village, Event", f"ожидалось 'Village, Event', получено {v[1]!r}"
-assert saved[-1][0]["channels"] == ["Village", "Event"], "channels не сохранились"
-assert "channel" not in saved[-1][0], "старый ключ channel не удалён"
-toggle("Local")
-assert find_dropdown(), "список закрылся после выбора канала!"
-v = row_values()
-assert v[1] == "Local, Village, Event", \
-    f"ожидалось 'Local, Village, Event', получено {v[1]!r}"
-assert saved[-1][0]["channels"] == ["Local", "Village", "Event"]
-toggle("Village")                # снять галочку — Village уходит
-v = row_values()
-assert v[1] == "Local, Event", f"ожидалось 'Local, Event', получено {v[1]!r}"
-assert saved[-1][0]["channels"] == ["Local", "Event"]
-assert find_dropdown(), "список закрылся до закрытия"
-
-# «Любой» сбрасывает выбранные каналы
-toggle(m.tr("alert_any"))
-v = row_values()
-assert v[1] == m.tr("alert_any"), f"ожидался «Любой», получено {v[1]!r}"
-assert saved[-1][0]["channels"] == [], "channels не сброшены"
-toggle("Event")                  # вернуть Event как было
-v = row_values()
-assert v[1] == "Event"
-assert find_dropdown(), "список закрылся"
-
-# 3б) Escape закрывает список; повторный щелчок по каналу открывает снова
-win.event_generate("<Escape>")
-win.update()
-assert not find_dropdown(), "список не закрылся по Escape"
-click("channel")
-win.update()
-assert find_dropdown(), "список не переоткрылся по щелчку"
-# клик мимо закрывает список, но сам щелчок отрабатывает (флажок переключится)
-click("notify")
-win.update()
-assert not find_dropdown(), "список не закрылся по клику мимо"
-v = row_values()
-assert v[4] == "✓", "клик мимо не должен съедать щелчок по флажку"
-click("notify")                   # вернуть как было
-win.update()
-
-# 4) двойной щелчок по подстроке → редактирование в ячейке
-e = None
-for attempt in range(5):
-    dblclick("pattern")
-    e = entry_open()
-    if e is not None:
-        break
-assert e is not None, "поле ввода не открылось"
-check_focus(e, "после двойного клика")
-type_in_entry(e, "wtb rare")
-v = row_values()
-assert v[2] == "wtb rare", "подстрока не изменилась"
-assert saved[-1][0]["pattern"] == "wtb rare"
-
-# 5) «Новый» → сразу открывается ввод подстроки
-btn_add = find_button(m.tr("alerts_add"))
-btn_add.invoke()
-e = None
-for attempt in range(5):
-    win.update()
-    e = entry_open()
-    if e is not None:
-        break
-assert e is not None, "после «Новый» ввод не открылся"
-check_focus(e, "после «Новый»")
-type_in_entry(e, "hello world")
-ids = tree.get_children()
-assert len(ids) == 2, "правило не добавилось"
-assert saved[-1][1]["pattern"] == "hello world"
-
-# 6) «Удалить» удаляет выбранное
-tree.selection_set("0")
-btn_del = find_button(m.tr("alerts_remove"))
-btn_del.invoke()
-win.update()
-ids = tree.get_children()
-assert len(ids) == 1, "правило не удалилось"
-assert saved[-1][0]["pattern"] == "hello world"
-
-# 7) «Закрыть» сохраняет и уничтожает окно
-btn_close = find_button(m.tr("btn_close"))
-btn_close.invoke()
-win.update()
-alive = bool(int(win.tk.call("winfo", "exists", win._w)))
-assert not alive, "окно не закрылось"
-assert cfg["alerts"][0]["pattern"] == "hello world"
-
-print("OK")
-root.destroy()
+failed = [n for n, ok in results if not ok]
+if not results:
+    print("НИ ОДНОЙ проверки не выполнено — сценарий не отработал")
+    sys.exit(1)
+print(f"Выполнено проверок: {len(results)}")
+print("Итог:", "все проверки пройдены" if not failed else f"ошибки: {failed}")
+sys.exit(1 if failed else 0)

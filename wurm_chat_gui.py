@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.6.0"
+APP_VERSION = "1.7.6.1"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -753,6 +753,18 @@ def resolve_sound_path(sound_id, custom="", sdir=None):
         if os.path.isfile(path):
             return path
     return None
+
+
+def rule_sound_path(fired_rules, channel_path=None, custom=""):
+    """Звук для сработавших сигналов: первое правило со своим звуком из
+    коллекции важнее звука канала; у правил без выбора — звук канала
+    (channel_path), а если и его нет — сигнал по умолчанию."""
+    for r in fired_rules or []:
+        if r.get("sound") and r.get("sound_id") in BUILTIN_SOUNDS:
+            path = resolve_sound_path(r["sound_id"], custom)
+            if path:
+                return path
+    return channel_path
 
 
 def mentioned_in(text, player_name):
@@ -2031,7 +2043,8 @@ I18N = {
                        "Вкладка подсвечивается красным; одно правило не "
                        "срабатывает чаще раза в 10 секунд. Щелчок по ✓/— "
                        "переключает флажок, по каналу открывает список выбора "
-                       "каналов, двойной щелчок по подстроке или тексту "
+                       "каналов, щелчок по «Звук» — выбор сигнала из коллекции "
+                       "или «Выкл.», двойной щелчок по подстроке или тексту "
                        "уведомления — правка. Свой текст в уведомлении: "
                        "показывается вместо текста сообщения.",
         "alert_toast_title": "Сигнал",
@@ -2119,6 +2132,8 @@ I18N = {
         "btn_play": "Прослушать",
         "tab_menu_sound_pick": "Звук этого канала",
         "sound_default": "Как общий",
+        "sound_channel_default": "Как у канала",
+        "sound_off": "Выкл.",
         "alerts_log_btn": "Журнал",
         "alerts_log_title": "Журнал срабатываний сигналов",
         "alerts_log_empty": "Срабатываний пока не было.",
@@ -2160,6 +2175,7 @@ I18N = {
                        "case-insensitive). The tab turns red; one rule fires "
                        "at most once per 10 seconds. Click ✓/— to toggle, "
                        "click the channel to open a channel checklist, "
+                       "click Sound to pick a signal (or turn it off), "
                        "double-click the substring to edit.",
         "alert_toast_title": "Alert",
         "settings_title": "Translation settings",
@@ -2246,6 +2262,8 @@ I18N = {
         "btn_play": "Play",
         "tab_menu_sound_pick": "Sound for this channel",
         "sound_default": "Same as global",
+        "sound_channel_default": "Channel default",
+        "sound_off": "Off",
         "alerts_log_btn": "Log",
         "alerts_log_title": "Alert history",
         "alerts_log_empty": "No alerts yet.",
@@ -2286,8 +2304,9 @@ I18N = {
                        "e tradução, sem distinção de maiúsculas). A aba fica "
                        "vermelha; uma regra dispara no máximo uma vez por "
                        "10 segundos. Clique em ✓/— para alternar, no canal "
-                       "para abrir a lista de canais; duplo clique na "
-                       "subcadeia para editar.",
+                       "para abrir a lista de canais; clique em «Som» para "
+                       "escolher um sinal da coleção (ou desligar); duplo "
+                       "clique na subcadeia para editar.",
         "alert_toast_title": "Alerta",
         "settings_title": "Configurações de tradução",
         "opt_auto_copy": "Copiar automaticamente a tradução da resposta para a área de transferência",
@@ -2375,6 +2394,8 @@ I18N = {
         "btn_play": "Ouvir",
         "tab_menu_sound_pick": "Som deste canal",
         "sound_default": "Como o geral",
+        "sound_channel_default": "Som do canal",
+        "sound_off": "Desligado",
         "alerts_log_btn": "Registro",
         "alerts_log_title": "Histórico de alertas",
         "alerts_log_empty": "Nenhum alerta ainda.",
@@ -2416,8 +2437,9 @@ I18N = {
                        "Groß-/Kleinschreibung egal). Der Reiter wird rot; "
                        "eine Regel löst höchstens einmal pro 10 Sekunden aus. "
                        "Klick auf ✓/— schaltet um, auf den Kanal öffnet die "
-                       "Kanalauswahl, Doppelklick auf den Teilstring "
-                       "bearbeitet ihn.",
+                       "Kanalauswahl, Klick auf «Ton» wählt ein Signal aus der "
+                       "Sound-Sammlung (oder schaltet ab), Doppelklick auf "
+                       "den Teilstring bearbeitet ihn.",
         "alert_toast_title": "Signal",
         "opt_auto_copy": "Übersetzte Antwort automatisch in die Zwischenablage kopieren",
         "settings_title": "Übersetzungseinstellungen",
@@ -2507,6 +2529,8 @@ I18N = {
         "btn_play": "Anhören",
         "tab_menu_sound_pick": "Ton für diesen Kanal",
         "sound_default": "Wie global",
+        "sound_channel_default": "Kanal-Standard",
+        "sound_off": "Aus",
         "alerts_log_btn": "Protokoll",
         "alerts_log_title": "Signalprotokoll",
         "alerts_log_empty": "Noch keine Signale.",
@@ -2549,7 +2573,9 @@ I18N = {
                        "mayúsculas). La pestaña se pone roja; una regla se "
                        "activa como máximo una vez cada 10 segundos. Clic en "
                        "✓/— para alternar, en el canal para abrir la lista de "
-                       "canales; doble clic en la subcadena para editar.",
+                       "canales; clic en «Sonido» para elegir una señal de la "
+                       "colección (o apagarla); doble clic en la subcadena "
+                       "para editar.",
         "alert_toast_title": "Alerta",
         "settings_title": "Ajustes de traducción",
         "opt_lang_channels": "Traducir chats de idiomas (Russian GL, English GL, …)",
@@ -2636,6 +2662,8 @@ I18N = {
         "btn_play": "Escuchar",
         "tab_menu_sound_pick": "Sonido de este canal",
         "sound_default": "Como el general",
+        "sound_channel_default": "Sonido del canal",
+        "sound_off": "Apagado",
         "alerts_log_btn": "Registro",
         "alerts_log_title": "Historial de alertas",
         "alerts_log_empty": "Aún no hay alertas.",
@@ -2678,8 +2706,9 @@ I18N = {
                        "distinction de casse). L'onglet devient rouge ; une "
                        "règle se déclenche au plus une fois par 10 secondes. "
                        "Cliquez sur ✓/— pour basculer, sur le canal pour "
-                       "ouvrir la liste des canaux ; double-cliquez sur la "
-                       "sous-chaîne pour l'éditer.",
+                       "ouvrir la liste des canaux ; cliquez sur « Son » pour "
+                       "choisir un signal de la collection (ou le couper) ; "
+                       "double-cliquez sur la sous-chaîne pour l'éditer.",
         "alert_toast_title": "Alerte",
         "settings_title": "Paramètres de traduction",
         "opt_lang_channels": "Traduire les canaux de langue (Russian GL, English GL, …)",
@@ -2768,6 +2797,8 @@ I18N = {
         "btn_play": "Écouter",
         "tab_menu_sound_pick": "Son de ce canal",
         "sound_default": "Comme le réglage général",
+        "sound_channel_default": "Son du canal",
+        "sound_off": "Désactivé",
         "alerts_log_btn": "Journal",
         "alerts_log_title": "Journal des alertes",
         "alerts_log_empty": "Aucune alerte pour le moment.",
@@ -2807,8 +2838,8 @@ I18N = {
         "alerts_done": "完成",
         "alerts_hint": "当子串出现在频道中时触发（检查原文和译文，不区分"
                        "大小写）。标签页变红；同一规则每 10 秒最多触发一次。"
-                       "单击 ✓/— 切换，单击频道打开频道选择列表，双击子串"
-                       "进行编辑。",
+                       "单击 ✓/— 切换，单击频道打开频道选择列表，单击「声音」"
+                       "从声音收藏中选择提示音（或关闭），双击子串进行编辑。",
         "alert_toast_title": "提醒",
         "settings_title": "翻译设置",
         "opt_lang_channels": "翻译语言频道（Russian GL、English GL 等）",
@@ -2891,6 +2922,8 @@ I18N = {
         "btn_play": "试听",
         "tab_menu_sound_pick": "此频道的声音",
         "sound_default": "同全局",
+        "sound_channel_default": "频道声音",
+        "sound_off": "关闭",
         "alerts_log_btn": "日志",
         "alerts_log_title": "提醒记录",
         "alerts_log_empty": "暂无提醒。",
@@ -3858,7 +3891,8 @@ def run_gui():
             if any(r.get("sound") for r in fired) \
                     and channel_flag(cfg.get("sound_channels"), channel):
                 alert_state["sound"] = True    # обычный звук сообщения не дублируем
-                play_sound(channel_sound_path(channel))
+                play_sound(rule_sound_path(fired, channel_sound_path(channel),
+                                           cfg.get("sound_file") or ""))
             if any(r.get("notify") for r in fired) \
                     and channel_flag(cfg.get("notify_channels"), channel):
                 cls = cfg.get("clients") or []
@@ -4270,8 +4304,8 @@ def run_gui():
         tree.heading("note", text=tr("alerts_col_note"))
         tree.column("on", width=40, anchor="center")
         tree.column("channel", width=130, anchor="w")
-        tree.column("pattern", width=210, anchor="w")
-        tree.column("sound", width=55, anchor="center")
+        tree.column("pattern", width=190, anchor="w")
+        tree.column("sound", width=95, anchor="center")
         tree.column("notify", width=75, anchor="center")
         tree.column("note", width=190, anchor="w")
         scroll = ttk.Scrollbar(table_frame, orient="vertical",
@@ -4282,7 +4316,7 @@ def run_gui():
 
         mark = lambda b: "✓" if b else "—"   # noqa: E731
         ch_names = [name for name, _, _ in CHANNELS]
-        BOOL_COLS = {"on": "enabled", "sound": "sound", "notify": "notify"}
+        BOOL_COLS = {"on": "enabled", "notify": "notify"}
 
         def autosave():
             cfg["alerts"] = rules
@@ -4294,6 +4328,13 @@ def run_gui():
                 return tr("alert_any")
             return ", ".join(n for n in ch_names if n in chans)
 
+        def sound_text(r):
+            """Ячейка «Звук»: — выкл; «✓» — как у канала; имя — свой звук."""
+            if not r.get("sound"):
+                return "—"
+            sid = r.get("sound_id") or ""
+            return tr(f"snd_{sid}") if sid else "✓"
+
         def refill():
             for iid in tree.get_children():
                 tree.delete(iid)
@@ -4302,21 +4343,20 @@ def run_gui():
                     mark(bool(r.get("enabled", True))),
                     channel_text(r),
                     r.get("pattern", ""),
-                    mark(bool(r.get("sound"))),
+                    sound_text(r),
                     mark(bool(r.get("notify"))),
                     r.get("note", "")))
 
-        # -------- выпадающий чек-лист каналов прямо в ячейке «Канал» --------
-        # По щелчку под ячейкой раскрывается список «☑ Любой / ☐ Local…».
-        # Пункт применяется и сохраняется сразу, список открыт, пока не
-        # кликнут мимо или не нажали Escape. Отдельных окон нет — фокус и
-        # z-order не участвуют.
-        ch_dd = {"lb": None, "iid": None, "fresh": False}
+        # -------- выпадающие списки прямо в ячейках («Канал», «Звук») --------
+        # По щелчку под ячейкой раскрывается листбокс. Пункт применяется и
+        # сохраняется сразу. Список каналов — с множественным выбором (открыт,
+        # пока не кликнули мимо); список звуков — одиночный выбор, закрывается
+        # сразу. Отдельных окон нет — фокус и z-order не участвуют.
+        cell_dd = {"lb": None, "fresh": False}
 
-        def close_channel_dropdown():
-            lb = ch_dd["lb"]
-            ch_dd["lb"] = None
-            ch_dd["iid"] = None
+        def close_dropdown():
+            lb = cell_dd.get("lb")
+            cell_dd["lb"] = None
             if lb is not None:
                 try:
                     lb.destroy()
@@ -4325,86 +4365,123 @@ def run_gui():
 
         def _dd_global_click(event):
             """Клик мимо списка — закрыть его (клик дальше отрабатывает)."""
-            lb = ch_dd["lb"]
+            lb = cell_dd.get("lb")
             if lb is None:
                 return
-            if ch_dd["fresh"]:              # собственный щелчок открытия
-                ch_dd["fresh"] = False
+            if cell_dd["fresh"]:            # собственный щелчок открытия
+                cell_dd["fresh"] = False
                 return
             px, py = lb.winfo_rootx(), lb.winfo_rooty()
             pw, ph = lb.winfo_width(), lb.winfo_height()
             if px <= event.x_root < px + pw and py <= event.y_root < py + ph:
                 return                      # клик внутри списка
-            close_channel_dropdown()
+            close_dropdown()
 
         def _dd_global_escape(_e):
-            if ch_dd["lb"] is not None:
-                close_channel_dropdown()
+            close_dropdown()
+
+        def _dd_pick(event):
+            lb = event.widget
+            idx = lb.nearest(event.y)
+            if idx >= 0 and getattr(lb, "_on_pick", None):
+                lb._on_pick(idx)
+            return "break"                  # без стандартного выделения
 
         win.bind_all("<Button-1>", _dd_global_click, add="+")
         win.bind_all("<Escape>", _dd_global_escape, add="+")
 
-        def open_channel_dropdown(iid):
-            if ch_dd["lb"] is not None:
-                close_channel_dropdown()
-            r = rules[int(iid)]
-            bbox = tree.bbox(iid, "channel")
+        def show_dropdown(iid, col, min_width, render, on_pick):
+            """Листбокс под ячейкой col: render(lb) заполняет пункты,
+            on_pick(idx) — обработчик выбора. Активен один список."""
+            close_dropdown()
+            bbox = tree.bbox(iid, col)
             if not bbox:
                 return
             x, y, w, h = bbox
             fx = x + tree.winfo_x()
             fy = y + tree.winfo_y()
-            names = [tr("alert_any")] + ch_names
-            lb = tk.Listbox(table_frame, height=min(12, len(names)),
-                            exportselection=False, activestyle="none",
-                            highlightthickness=1, cursor="hand2",
-                            relief="solid", bd=1)
-            lb.place(x=fx, y=0, width=max(w, 170))     # для замера высоты
+            lb = tk.Listbox(table_frame, height=8, exportselection=False,
+                            activestyle="none", highlightthickness=1,
+                            cursor="hand2", relief="solid", bd=1)
+            lb.place(x=fx, y=0, width=max(w, min_width))   # для замера высоты
             lh = lb.winfo_reqheight()
             if fy + h + lh > table_frame.winfo_height():
                 ly = max(0, fy - lh)                    # раскрыть вверх
             else:
                 ly = fy + h                             # раскрыть вниз
-            lb.place(x=fx, y=ly, width=max(w, 170))
+            lb.place(x=fx, y=ly, width=max(w, min_width))
+            lb.bind("<Button-1>", _dd_pick)
+            lb.bind("<ButtonRelease-1>", lambda _e: "break")
+            lb.bind("<B1-Motion>", lambda _e: "break")
+            lb._on_pick = on_pick
+            render(lb)
+            cell_dd["lb"] = lb
+            cell_dd["fresh"] = True
 
-            def apply(sel_names):
-                r.pop("channel", None)          # старый формат не нужен
-                r["channels"] = [n for n in ch_names if n in sel_names]
-                refill()
-                tree.selection_set(iid)
-                autosave()
+        def open_channel_dropdown(iid):
+            r = rules[int(iid)]
+            names = [tr("alert_any")] + ch_names
 
-            def render():
+            def render(lb):
                 lb.delete(0, "end")
                 chans = set(rule_channels(r))
                 for n in names:
                     on = (not chans) if n == tr("alert_any") else (n in chans)
                     lb.insert("end", ("☑ " if on else "☐ ") + n)
 
-            def on_pick(event):
-                idx = lb.nearest(event.y)
-                if idx < 0:
-                    return "break"
+            def on_pick(idx):
                 name = names[idx]
                 chans = set(rule_channels(r))
                 if name == tr("alert_any"):
-                    apply(set())                # «Любой» — сбросить каналы
+                    chans = set()               # «Любой» — сбросить каналы
+                elif name in chans:
+                    chans.discard(name)
                 else:
-                    if name in chans:
-                        chans.discard(name)
-                    else:
-                        chans.add(name)
-                    apply(chans)
-                render()
-                return "break"                  # без стандартного выделения
+                    chans.add(name)
+                r.pop("channel", None)          # старый формат не нужен
+                r["channels"] = [n for n in ch_names if n in chans]
+                refill()
+                tree.selection_set(iid)
+                autosave()
+                if cell_dd.get("lb") is not None:
+                    render(cell_dd["lb"])       # мультивыбор — список открыт
 
-            lb.bind("<Button-1>", on_pick)
-            lb.bind("<ButtonRelease-1>", lambda _e: "break")
-            lb.bind("<B1-Motion>", lambda _e: "break")
-            render()
-            ch_dd["lb"] = lb
-            ch_dd["iid"] = iid
-            ch_dd["fresh"] = True
+            show_dropdown(iid, "channel", 170, render, on_pick)
+
+        def open_sound_dropdown(iid):
+            """Выбор сигнала правила: выключен / «как у канала» / конкретный
+            звук из встроенной коллекции. Одиночный выбор — список закрывается."""
+            r = rules[int(iid)]
+
+            def render(lb):
+                lb.delete(0, "end")
+                cur = ("off",) if not r.get("sound") \
+                    else ("",) if not r.get("sound_id") else (r["sound_id"],)
+                items = [("off", tr("sound_off")),
+                         ("", tr("sound_channel_default"))] \
+                    + [(sid, tr(f"snd_{sid}")) for sid in BUILTIN_SOUNDS]
+                lb._items = items
+                for sid, label in items:
+                    lb.insert("end", ("● " if sid in cur else "○ ") + label)
+
+            def on_pick(idx):
+                lb = cell_dd.get("lb")
+                items = getattr(lb, "_items", []) if lb is not None else []
+                sid = items[idx][0] if idx < len(items) else "off"
+                if sid == "off":
+                    r["sound"] = False
+                else:
+                    r["sound"] = True
+                    if sid:
+                        r["sound_id"] = sid
+                    else:
+                        r.pop("sound_id", None)
+                refill()
+                tree.selection_set(iid)
+                autosave()
+                close_dropdown()                # одиночный выбор — закрыли
+
+            show_dropdown(iid, "sound", 160, render, on_pick)
 
         # -------- щелчок: переключить флажок или открыть выбор каналов --------
         def on_click(event):
@@ -4422,6 +4499,9 @@ def run_gui():
                 r[key] = not bool(r.get(key))
             elif col == "channel":
                 open_channel_dropdown(iid)
+                return      # список сам сохраняет изменения
+            elif col == "sound":
+                open_sound_dropdown(iid)
                 return      # список сам сохраняет изменения
             else:
                 return
@@ -4978,6 +5058,15 @@ def self_test():
             dst.write(src.read())
         good = good and resolve_sound_path("beep", custom=_custom) == _custom
         os.remove(_custom)
+        # звук правила сигнала: свой выбор важнее звука канала
+        _ch = os.path.join(tempfile.gettempdir(), "chan.wav")
+        good = good and \
+            rule_sound_path([{"sound": True, "sound_id": "bell"}]
+                            ).endswith("bell.wav") \
+            and rule_sound_path([{"sound": True}], _ch) == _ch \
+            and rule_sound_path([{"sound": True, "sound_id": "zzz"}],
+                                _ch) == _ch \
+            and rule_sound_path([], _ch) == _ch
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] звуки: {len(BUILTIN_SOUNDS)} "
               f"встроенных, папка: {sounds_dir()}")

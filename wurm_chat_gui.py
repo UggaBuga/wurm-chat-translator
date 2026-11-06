@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.6.3"
+APP_VERSION = "1.7.7.0"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -184,6 +184,109 @@ def check_latest_release(timeout=8):
     except Exception as exc:
         log_debug(f"проверка обновлений: не удалось: {exc!r}")
         return None
+
+
+def download_update(dest, timeout=240):
+    """Скачать exe последнего релиза в dest. True — файл на месте и не пуст."""
+    try:
+        curl = _find_curl()
+        if curl:
+            cf = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.run(
+                [curl, "-sS", "-L", "--max-time", str(timeout), "-A",
+                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                 "-o", dest, LATEST_EXE_URL],
+                capture_output=True, creationflags=cf, timeout=timeout + 15)
+            if out.returncode != 0:
+                log_debug(f"автообновление: curl вернул {out.returncode}: "
+                          f"{out.stderr.decode('utf-8', 'replace')[:200]}")
+                return False
+        else:                       # крайний случай — без curl, через urllib
+            import urllib.request
+            req = urllib.request.Request(
+                LATEST_EXE_URL,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=timeout) as r, \
+                    open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        ok = os.path.isfile(dest) and os.path.getsize(dest) > 3_000_000
+        if not ok and os.path.isfile(dest):
+            os.remove(dest)
+        return ok
+    except Exception as exc:
+        log_debug(f"автообновление: скачивание не удалось: {exc!r}")
+        try:
+            if os.path.isfile(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        return False
+
+
+def _ps_quote(path):
+    """Путь для вставки в одинарные кавычки PowerShell."""
+    return path.replace("'", "''")
+
+
+def build_update_script(exe, tmp, pid):
+    """Скрипт помощника: дождаться выхода старой копии, подменить exe,
+    запустить новую. При неудаче — вернуть старую обратно. Процесс к этому
+    моменту может быть уже завершён — Get-Process/Wait-Process терпят это."""
+    bak = exe + ".bak"
+    return f"""$ErrorActionPreference = 'Stop'
+$old = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue
+if ($old) {{ try {{ Wait-Process -Id {int(pid)} -Timeout 90 }} catch {{}} }}
+Start-Sleep -Milliseconds 800
+try {{
+  $moved = $false
+  for ($i = 0; $i -lt 20; $i++) {{
+    try {{
+      Move-Item -LiteralPath '{_ps_quote(exe)}' -Destination '{_ps_quote(bak)}' -Force
+      $moved = $true
+      break
+    }} catch {{
+      Start-Sleep -Milliseconds 500
+    }}
+  }}
+  if (-not $moved) {{ throw 'cannot replace exe' }}
+  Move-Item -LiteralPath '{_ps_quote(tmp)}' -Destination '{_ps_quote(exe)}' -Force
+  Start-Process '{_ps_quote(exe)}'
+  Remove-Item -LiteralPath '{_ps_quote(bak)}' -Force -ErrorAction SilentlyContinue
+}} catch {{
+  if (Test-Path -LiteralPath '{_ps_quote(bak)}') {{
+    Move-Item -LiteralPath '{_ps_quote(bak)}' -Destination '{_ps_quote(exe)}' -Force -ErrorAction SilentlyContinue
+  }}
+}}
+Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
+"""
+
+
+def spawn_update_helper(exe, tmp):
+    """Запустить отсоединённого помощника, который дождётся нашего выхода,
+    заменит exe свежескачанным и стартанёт его. True — помощник запущен."""
+    try:
+        script = build_update_script(exe, tmp, os.getpid())
+        fd, ps1 = tempfile.mkstemp(prefix="wct_update_", suffix=".ps1")
+        # BOM обязателен: Windows PowerShell 5.1 читает ps1 без BOM как ANSI
+        # и портит кириллицу в путях (скрипт падает, замена не происходит)
+        with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
+            f.write(script)
+        # DETACHED_PROCESS нельзя: PowerShell без консоли молча не стартует.
+        # NO_WINDOW + NEW_PROCESS_GROUP — помощник живёт сам по себе.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) \
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+             "-ExecutionPolicy", "Bypass", "-File", ps1],
+            creationflags=flags, close_fds=True)
+        return True
+    except Exception as exc:
+        log_debug(f"автообновление: помощник не запущен: {exc!r}")
+        return False
 
 # Корни установки Wurm Online: Steam-версия и автономный клиент с сайта
 # (у него данные лежат в домашней папке пользователя). Подпапка игрока
@@ -1018,6 +1121,11 @@ class LogWatcher(threading.Thread):
                         self.offsets[path] = os.path.getsize(path)
                     except OSError:
                         pass
+        # Граница «прошлого» для кнопки «Порыться в прошлом»: снимок
+        # смещений и момента запуска. Всё, что было в файлах ДО этого
+        # снимка, — «прошлое»; позже появившиеся файлы сюда не входят.
+        self.started_at = datetime.datetime.now()
+        self.start_offsets = dict(self.offsets)
 
     def current_paths(self, prefix, is_pm):
         """Файлы канала: PM__<Имя>.<YYYY-MM>.txt или <канал>.<YYYY-MM>.txt."""
@@ -1831,7 +1939,12 @@ class TranslateWorker(threading.Thread):
             return
         if not item or item[0] != "line":
             return
-        _, client_idx, channel, line = item
+        _, client_idx, channel, line = item[:4]
+        # 5-й элемент — токен «прошлого» (кнопка «Порыться в прошлом»):
+        # результат вернётся как past_done и будет выведен иначе — раскраской
+        # «прошлого». Токен (а не просто флаг) отсекает опоздавшие результаты
+        # предыдущей раскопки, если кнопку нажали повторно
+        past_tok = item[4] if len(item) > 4 else None
 
         parsed = parse_chat_line(line)
         if parsed:
@@ -1895,8 +2008,12 @@ class TranslateWorker(threading.Thread):
                                           self.target_lang if use_currency
                                           else None)
 
-        self.done.put(("done", client_idx, channel, t, name, body, translated,
-                       src_lang))
+        if past_tok is not None:
+            self.done.put(("past_done", past_tok, client_idx, channel, t,
+                           name, body, translated, src_lang))
+        else:
+            self.done.put(("done", client_idx, channel, t, name, body,
+                           translated, src_lang))
 
 
 # --------------------------------------------------------------------------- #
@@ -1919,6 +2036,8 @@ DEFAULTS = {
     "auto_copy_reply": True,           # перевод ответа — сразу в буфер обмена
     "sound_channels": [],   # каналы со звуком на новые сообщения (иконка 🔊)
     "notify_channels": [],  # каналы с уведомлениями на новые сообщения (🔔)
+    "auto_update": True,    # автоустановка обновлений: спросить, скачать,
+                            # заменить, перезапустить (вкл. по умолчанию)
     "alerts": [],                      # сигналы: channels/pattern/enabled/...
 }
 # Сигнал по умолчанию: фраза археологии «можно копать центр бывшего дида»
@@ -2075,6 +2194,23 @@ I18N = {
         "btn_stop": "■ Стоп",
         "btn_clear": "Очистить всё",
         "btn_search": "🔍 Найти",
+        "btn_dig": "🕑 Прошлое",
+        "dig_title": "Порыться в прошлом",
+        "dig_target": "Канал: {ch}",
+        "dig_mode_count": "последних сообщений",
+        "dig_mode_minutes": "минут до запуска",
+        "dig_label_count": "Сколько сообщений взять:",
+        "dig_label_minutes": "За сколько минут до запуска:",
+        "dig_pos": "Куда вывести:",
+        "dig_pos_start": "в начало текущего чата",
+        "dig_pos_end": "в конец текущего чата",
+        "dig_show": "Показать",
+        "dig_cancel": "Отмена",
+        "dig_need_run": "Сначала запустите слежение — «прошлое» "
+                        "появляется только после его запуска.",
+        "dig_empty": "До запуска в этот канал никто не писал.",
+        "dig_header_count": "⏳ Прошлое — последние {n} сообщений",
+        "dig_header_minutes": "⏳ Прошлое — за {n} мин до запуска",
         "glossary_link": "Словарь",
         "no_clients_hint": "Клиенты не заданы. Нажмите «Клиенты…» и добавьте "
                            "папку логов …\\players\\<Игрок>\\logs",
@@ -2098,6 +2234,23 @@ I18N = {
         "search_hint": "Двойной клик по результату — перейти ко вкладке",
         "tray_show": "Показать",
         "tray_quit": "Выход",
+        "opt_auto_update": "Автоматически скачивать и устанавливать обновления",
+        "update_dl_title": "Обновление переводчика",
+        "update_ask_title": "Доступна новая версия",
+        "update_ask_msg": "Вышла версия {new} (у вас {cur}).\n"
+                          "Скачать и установить?",
+        "btn_check_updates": "Проверить обновления",
+        "update_none": "У вас последняя версия ({cur}).",
+        "update_check_failed": "Не удалось проверить обновления.\n"
+                               "Проверьте подключение к сети.",
+        "update_ask_no_remind": "Не напоминать об этом обновлении",
+        "update_yes": "Да",
+        "update_no": "Нет",
+        "update_downloading": "Скачивание версии v{ver}…\n"
+                             "Окно закроется само, переводчик перезапустится.",
+        "update_restarting": "Обновление скачано. Перезапуск…",
+        "update_failed": "Не удалось скачать обновление.\n"
+                         "Открыть страницу загрузки?",
         "update_msg": "Доступна новая версия v{new} (у вас v{cur}).\n\n"
                       "Открыть страницу загрузки?\n"
                       "(Скачанный exe можно положить поверх старого — "
@@ -2207,6 +2360,23 @@ I18N = {
         "btn_stop": "■ Stop",
         "btn_clear": "Clear all",
         "btn_search": "🔍 Find",
+        "btn_dig": "🕑 Past",
+        "dig_title": "Dig into the past",
+        "dig_target": "Channel: {ch}",
+        "dig_mode_count": "last messages",
+        "dig_mode_minutes": "minutes before startup",
+        "dig_label_count": "How many messages to take:",
+        "dig_label_minutes": "How many minutes before startup:",
+        "dig_pos": "Where to put them:",
+        "dig_pos_start": "at the top of the chat",
+        "dig_pos_end": "at the bottom of the chat",
+        "dig_show": "Show",
+        "dig_cancel": "Cancel",
+        "dig_need_run": "Start watching first — the “past” only exists "
+                        "after it starts.",
+        "dig_empty": "Nobody wrote to this channel before startup.",
+        "dig_header_count": "⏳ Past — last {n} messages",
+        "dig_header_minutes": "⏳ Past — {n} min before startup",
         "glossary_link": "Glossary",
         "no_clients_hint": "No clients set. Click “Clients…” and add a logs "
                            "folder …\\players\\<Player>\\logs",
@@ -2230,6 +2400,24 @@ I18N = {
         "search_hint": "Double-click a result to jump to its tab",
         "tray_show": "Show",
         "tray_quit": "Exit",
+        "opt_auto_update": "Automatically download and install updates",
+        "update_dl_title": "Translator update",
+        "update_ask_title": "Update available",
+        "update_ask_msg": "Version {new} is available (you have {cur}).\n"
+                          "Download and install it now?",
+        "btn_check_updates": "Check for updates",
+        "update_none": "You have the latest version ({cur}).",
+        "update_check_failed": "Couldn't check for updates.\n"
+                               "Check your internet connection.",
+        "update_ask_no_remind": "Don't remind me about this update",
+        "update_yes": "Yes",
+        "update_no": "No",
+        "update_downloading": "Downloading v{ver}…\n"
+                             "This window will close itself and the translator "
+                             "will restart.",
+        "update_restarting": "Update downloaded. Restarting…",
+        "update_failed": "Could not download the update.\n"
+                         "Open the download page?",
         "update_msg": "A new version v{new} is available (you have v{cur}).\n\n"
                       "Open the download page?\n"
                       "(You can place the downloaded exe over the old one — "
@@ -2339,6 +2527,23 @@ I18N = {
         "btn_stop": "■ Parar",
         "btn_clear": "Limpar tudo",
         "btn_search": "🔍 Buscar",
+        "btn_dig": "🕑 Passado",
+        "dig_title": "Cavar o passado",
+        "dig_target": "Canal: {ch}",
+        "dig_mode_count": "últimas mensagens",
+        "dig_mode_minutes": "minutos antes do início",
+        "dig_label_count": "Quantas mensagens pegar:",
+        "dig_label_minutes": "Quantos minutos antes do início:",
+        "dig_pos": "Onde colocar:",
+        "dig_pos_start": "no início do chat",
+        "dig_pos_end": "no final do chat",
+        "dig_show": "Mostrar",
+        "dig_cancel": "Cancelar",
+        "dig_need_run": "Primeiro inicie a vigilância — o «passado» só "
+                        "existe depois dela.",
+        "dig_empty": "Ninguém escreveu neste canal antes do início.",
+        "dig_header_count": "⏳ Passado — últimas {n} mensagens",
+        "dig_header_minutes": "⏳ Passado — {n} min antes do início",
         "glossary_link": "Glossário",
         "no_clients_hint": "Sem clientes. Clique em «Clientes…» e adicione a "
                            "pasta de logs …\\players\\<Jogador>\\logs",
@@ -2363,6 +2568,24 @@ I18N = {
         "search_hint": "Duplo clique num resultado para ir à aba",
         "tray_show": "Mostrar",
         "tray_quit": "Sair",
+        "opt_auto_update": "Baixar e instalar atualizações automaticamente",
+        "update_dl_title": "Atualização do tradutor",
+        "update_ask_title": "Nova versão disponível",
+        "update_ask_msg": "Versão {new} disponível (você tem {cur}).\n"
+                          "Baixar e instalar agora?",
+        "btn_check_updates": "Verificar atualizações",
+        "update_none": "Você tem a versão mais recente ({cur}).",
+        "update_check_failed": "Não foi possível verificar atualizações.\n"
+                               "Verifique a conexão.",
+        "update_ask_no_remind": "Não lembrar desta atualização",
+        "update_yes": "Sim",
+        "update_no": "Não",
+        "update_downloading": "Baixando a versão v{ver}…\n"
+                             "Esta janela se fechará sozinha e o tradutor "
+                             "reiniciará.",
+        "update_restarting": "Atualização baixada. Reiniciando…",
+        "update_failed": "Não foi possível baixar a atualização.\n"
+                         "Abrir a página de download?",
         "update_msg": "Nova versão v{new} disponível (você tem v{cur}).\n\n"
                       "Abrir a página de download?\n"
                       "(O exe baixado pode substituir o antigo — as "
@@ -2474,6 +2697,24 @@ I18N = {
         "btn_stop": "■ Stopp",
         "btn_clear": "Alles löschen",
         "btn_search": "🔍 Suchen",
+        "btn_dig": "🕑 Vergangenheit",
+        "dig_title": "In der Vergangenheit wühlen",
+        "dig_target": "Kanal: {ch}",
+        "dig_mode_count": "letzte Nachrichten",
+        "dig_mode_minutes": "Minuten vor dem Start",
+        "dig_label_count": "Wie viele Nachrichten nehmen:",
+        "dig_label_minutes": "Wie viele Minuten vor dem Start:",
+        "dig_pos": "Wohin damit:",
+        "dig_pos_start": "an den Anfang des Chats",
+        "dig_pos_end": "an das Ende des Chats",
+        "dig_show": "Anzeigen",
+        "dig_cancel": "Abbrechen",
+        "dig_need_run": "Erst die Überwachung starten — «Vergangenheit» "
+                        "gibt es erst danach.",
+        "dig_empty": "Vor dem Start hat niemand in diesen Kanal "
+                     "geschrieben.",
+        "dig_header_count": "⏳ Vergangenheit — letzte {n} Nachrichten",
+        "dig_header_minutes": "⏳ Vergangenheit — {n} Min. vor dem Start",
         "glossary_link": "Glossar",
         "no_clients_hint": "Keine Clients gesetzt. Klicken Sie auf „Clients…” "
                            "und fügen Sie einen Log-Ordner hinzu: "
@@ -2500,6 +2741,24 @@ I18N = {
         "search_hint": "Doppelklick auf ein Ergebnis springt zum Tab",
         "tray_show": "Anzeigen",
         "tray_quit": "Beenden",
+        "opt_auto_update": "Updates automatisch herunterladen und installieren",
+        "update_dl_title": "Update des Übersetzers",
+        "update_ask_title": "Neue Version verfügbar",
+        "update_ask_msg": "Version {new} ist verfügbar (installiert: {cur}).\n"
+                          "Jetzt herunterladen und installieren?",
+        "btn_check_updates": "Nach Updates suchen",
+        "update_none": "Sie haben die neueste Version ({cur}).",
+        "update_check_failed": "Update-Prüfung fehlgeschlagen.\n"
+                               "Verbindung prüfen.",
+        "update_ask_no_remind": "Nicht mehr an dieses Update erinnern",
+        "update_yes": "Ja",
+        "update_no": "Nein",
+        "update_downloading": "Version v{ver} wird heruntergeladen…\n"
+                             "Dieses Fenster schließt sich von selbst, der "
+                             "Übersetzer startet neu.",
+        "update_restarting": "Update heruntergeladen. Neustart…",
+        "update_failed": "Das Update konnte nicht heruntergeladen werden.\n"
+                         "Download-Seite öffnen?",
         "update_msg": "Neue Version v{new} verfügbar (Sie haben v{cur}).\n\n"
                       "Download-Seite öffnen?\n"
                       "(Die heruntergeladene exe kann über die alte gelegt "
@@ -2611,6 +2870,23 @@ I18N = {
         "btn_stop": "■ Detener",
         "btn_clear": "Borrar todo",
         "btn_search": "🔍 Buscar",
+        "btn_dig": "🕑 Pasado",
+        "dig_title": "Hurgar en el pasado",
+        "dig_target": "Canal: {ch}",
+        "dig_mode_count": "últimos mensajes",
+        "dig_mode_minutes": "minutos antes del inicio",
+        "dig_label_count": "Cuántos mensajes tomar:",
+        "dig_label_minutes": "Cuántos minutos antes del inicio:",
+        "dig_pos": "Dónde ponerlos:",
+        "dig_pos_start": "al inicio del chat",
+        "dig_pos_end": "al final del chat",
+        "dig_show": "Mostrar",
+        "dig_cancel": "Cancelar",
+        "dig_need_run": "Primero inicia el seguimiento: el «pasado» solo "
+                        "existe después de eso.",
+        "dig_empty": "Nadie escribió en este canal antes del inicio.",
+        "dig_header_count": "⏳ Pasado — últimos {n} mensajes",
+        "dig_header_minutes": "⏳ Pasado — {n} min antes del inicio",
         "glossary_link": "Glosario",
         "no_clients_hint": "Sin clientes. Pulse «Clientes…» y añada la carpeta "
                            "de logs …\\players\\<Jugador>\\logs",
@@ -2635,6 +2911,25 @@ I18N = {
         "search_hint": "Doble clic en un resultado para ir a su pestaña",
         "tray_show": "Mostrar",
         "tray_quit": "Salir",
+        "opt_auto_update": "Descargar e instalar actualizaciones "
+                          "automáticamente",
+        "update_dl_title": "Actualización del traductor",
+        "update_ask_title": "Nueva versión disponible",
+        "update_ask_msg": "Versión {new} disponible (tienes {cur}).\n"
+                          "¿Descargar e instalar ahora?",
+        "btn_check_updates": "Buscar actualizaciones",
+        "update_none": "Tienes la versión más reciente ({cur}).",
+        "update_check_failed": "No se pudieron buscar actualizaciones.\n"
+                               "Comprueba la conexión.",
+        "update_ask_no_remind": "No recordar esta actualización",
+        "update_yes": "Sí",
+        "update_no": "No",
+        "update_downloading": "Descargando la versión v{ver}…\n"
+                             "Esta ventana se cerrará sola y el traductor "
+                             "se reiniciará.",
+        "update_restarting": "Actualización descargada. Reiniciando…",
+        "update_failed": "No se pudo descargar la actualización.\n"
+                         "¿Abrir la página de descarga?",
         "update_msg": "Nueva versión v{new} disponible (usted tiene v{cur}).\n\n"
                       "¿Abrir la página de descarga?\n"
                       "(El exe descargado puede reemplazar al anterior — la "
@@ -2746,6 +3041,23 @@ I18N = {
         "btn_stop": "■ Arrêter",
         "btn_clear": "Tout effacer",
         "btn_search": "🔍 Chercher",
+        "btn_dig": "🕑 Passé",
+        "dig_title": "Fouiller dans le passé",
+        "dig_target": "Canal : {ch}",
+        "dig_mode_count": "derniers messages",
+        "dig_mode_minutes": "minutes avant le lancement",
+        "dig_label_count": "Combien de messages prendre :",
+        "dig_label_minutes": "Combien de minutes avant le lancement :",
+        "dig_pos": "Où les placer :",
+        "dig_pos_start": "au début du chat",
+        "dig_pos_end": "à la fin du chat",
+        "dig_show": "Afficher",
+        "dig_cancel": "Annuler",
+        "dig_need_run": "Lancez d'abord la surveillance — le «passé» "
+                        "n'existe qu'après.",
+        "dig_empty": "Personne n'a écrit dans ce canal avant le lancement.",
+        "dig_header_count": "⏳ Passé — {n} derniers messages",
+        "dig_header_minutes": "⏳ Passé — {n} min avant le lancement",
         "glossary_link": "Glossaire",
         "no_clients_hint": "Aucun client défini. Cliquez sur « Clients… » et "
                            "ajoutez le dossier de logs …\\players\\<Joueur>\\logs",
@@ -2772,6 +3084,25 @@ I18N = {
         "search_hint": "Double-clic sur un résultat pour aller à son onglet",
         "tray_show": "Afficher",
         "tray_quit": "Quitter",
+        "opt_auto_update": "Télécharger et installer les mises à jour "
+                          "automatiquement",
+        "update_dl_title": "Mise à jour du traducteur",
+        "update_ask_title": "Nouvelle version disponible",
+        "update_ask_msg": "Version {new} disponible (vous avez {cur}).\n"
+                          "Télécharger et installer maintenant ?",
+        "btn_check_updates": "Rechercher des mises à jour",
+        "update_none": "Vous avez la dernière version ({cur}).",
+        "update_check_failed": "Échec de la recherche de mises à jour.\n"
+                               "Vérifiez la connexion.",
+        "update_ask_no_remind": "Ne plus me rappeler cette mise à jour",
+        "update_yes": "Oui",
+        "update_no": "Non",
+        "update_downloading": "Téléchargement de la version v{ver}…\n"
+                             "Cette fenêtre se fermera toute seule et le "
+                             "traducteur redémarrera.",
+        "update_restarting": "Mise à jour téléchargée. Redémarrage…",
+        "update_failed": "Impossible de télécharger la mise à jour.\n"
+                         "Ouvrir la page de téléchargement ?",
         "update_msg": "Nouvelle version v{new} disponible (vous avez v{cur}).\n\n"
                       "Ouvrir la page de téléchargement ?\n"
                       "(L'exe téléchargé peut remplacer l'ancien — les "
@@ -2879,6 +3210,22 @@ I18N = {
         "btn_stop": "■ 停止",
         "btn_clear": "全部清除",
         "btn_search": "🔍 搜索",
+        "btn_dig": "🕑 过去",
+        "dig_title": "挖掘过去",
+        "dig_target": "频道：{ch}",
+        "dig_mode_count": "最近的消息",
+        "dig_mode_minutes": "启动前多少分钟",
+        "dig_label_count": "取多少条消息：",
+        "dig_label_minutes": "启动前多少分钟：",
+        "dig_pos": "输出位置：",
+        "dig_pos_start": "当前聊天开头",
+        "dig_pos_end": "当前聊天末尾",
+        "dig_show": "显示",
+        "dig_cancel": "取消",
+        "dig_need_run": "请先启动监听——“过去”只在启动后存在。",
+        "dig_empty": "启动前，此频道无人发言。",
+        "dig_header_count": "⏳ 过去 — 最近 {n} 条消息",
+        "dig_header_minutes": "⏳ 过去 — 启动前 {n} 分钟",
         "glossary_link": "词典",
         "no_clients_hint": "尚未设置客户端。点击「客户端…」添加日志文件夹 "
                            "…\\players\\<玩家>\\logs",
@@ -2902,6 +3249,20 @@ I18N = {
         "search_hint": "双击结果跳转到对应标签页",
         "tray_show": "显示",
         "tray_quit": "退出",
+        "opt_auto_update": "自动下载并安装更新",
+        "update_dl_title": "翻译器更新",
+        "update_ask_title": "新版本可用",
+        "update_ask_msg": "新版本 {new} 可用（当前 {cur}）。\n立即下载并安装？",
+        "btn_check_updates": "检查更新",
+        "update_none": "已是最新版本（{cur}）。",
+        "update_check_failed": "检查更新失败。\n请检查网络连接。",
+        "update_ask_no_remind": "不再提醒此更新",
+        "update_yes": "是",
+        "update_no": "否",
+        "update_downloading": "正在下载 v{ver} 版本…\n"
+                             "此窗口将自动关闭，翻译器会重新启动。",
+        "update_restarting": "更新已下载。正在重新启动…",
+        "update_failed": "无法下载更新。\n打开下载页面？",
         "update_msg": "新版本 v{new} 可用（当前 v{cur}）。\n\n"
                       "打开下载页面？\n"
                       "（下载的 exe 可直接覆盖旧文件 — 设置会保留）",
@@ -3121,6 +3482,10 @@ def run_gui():
     clients_ui = []            # по индексу клиента: его вкладки и окна каналов
     current_client = {"idx": 0}
     history = {}               # (индекс клиента, канал) -> список сообщений
+    past = {}                  # (индекс клиента, канал) -> {"entries", "pos",
+                               # "header", "shown"} — блок «прошлого» из
+                               # кнопки «Порыться в прошлом» (строки лога,
+                               # записанные до запуска переводчика)
     txt_owner = {}             # виджет чата -> (индекс клиента, канал) — для ПКМ/подсветки
     alerted = {"tabs": set(), "clients": set()}   # подсвеченные красным сигналом
     alert_state = {"sound": False}   # сигнал уже пикнул — обычный звук не нужен
@@ -3380,6 +3745,15 @@ def run_gui():
                 txt.tag_config("name", font=("Segoe UI", 10, "bold"))
                 txt.tag_config("orig", foreground="#777777")
                 txt.tag_config("err", foreground="#cc0000")
+                # строки «прошлого» (кнопка «Порыться в прошлом»): курсив,
+                # приглушённый цвет, лёгкий сепиевый фон — сразу видно,
+                # что это не свежие сообщения
+                txt.tag_config("past", foreground="#6f7480",
+                               background="#f5efdc",
+                               font=("Segoe UI", 10, "italic"))
+                txt.tag_config("past_head", foreground="#8a6d1d",
+                               background="#f5efdc",
+                               font=("Segoe UI", 9, "bold italic"))
                 # упоминание имени персонажа — мягкий жёлтый фон сообщения
                 txt.tag_config("mention", background="#ffedad")
                 txt.tag_lower("mention")
@@ -3741,6 +4115,11 @@ def run_gui():
     search_entry.pack(side="left", padx=(12, 2))
     search_entry.bind("<Return>", do_search)
     ttk.Button(bottom, text=tr("btn_search"), command=do_search).pack(side="left")
+    # «Порыться в прошлом»: строки лога до запуска переводчика блоком
+    # со своей раскраской; lambda — функция объявлена ниже по файлу
+    ttk.Button(bottom, text=tr("btn_dig"),
+               command=lambda: open_dig_dialog()
+               ).pack(side="left", padx=(10, 0))
 
     # ---------------- логика ----------------
     def collect_cfg():
@@ -3802,6 +4181,33 @@ def run_gui():
         return (client_idx == current_client["idx"]
                 and channel == active_channel(client_idx))
 
+    def render_past_entry(txt, entry):
+        """Одно сообщение «прошлого»: тот же вид, что у render_entry, но всё
+        со стилем past — сразу ясно, что строка не из текущего потока."""
+        t, name, original, translated, _src = entry
+        if t:
+            txt.insert("end", f"[{t}] ", ("time", "past"))
+        if name:
+            txt.insert("end", f"{name}: ", ("name", "past"))
+        if translated is None:
+            txt.insert("end", original + "\n", ("orig", "past"))
+        elif translated == original:
+            txt.insert("end", original + "\n", "past")
+        elif orig_var.get():
+            txt.insert("end", original + "\n", ("orig", "past"))
+            txt.insert("end", translated + "\n", "past")
+            txt.insert("end", "\n", "past")
+        else:
+            txt.insert("end", translated + "\n", "past")
+            txt.insert("end", "\n", "past")
+
+    def render_past_block(txt, block):
+        """Заголовок + строки блока «прошлого» в конец виджета."""
+        if block.get("header"):
+            txt.insert("end", block["header"] + "\n", "past_head")
+        for entry in block.get("entries") or []:
+            render_past_entry(txt, entry)
+
     def rebuild_channel(client_idx, channel):
         if client_idx >= len(clients_ui):
             return
@@ -3814,13 +4220,198 @@ def run_gui():
         txt.config(state="normal")
         txt.delete("1.0", "end")
         entry_starts[txt] = []
+        block = past.get((client_idx, channel))
+        if block and block.get("pos") == "start" and \
+                (block.get("entries") or block.get("header")):
+            render_past_block(txt, block)
         for entry in history.get((client_idx, channel), []):
             render_entry(txt, entry)
+        if block and block.get("pos") == "end" and \
+                (block.get("entries") or block.get("header")):
+            render_past_block(txt, block)
         if at_end or not tab_visible(client_idx, channel):
             txt.see("end")
         else:
             txt.see(top)
         txt.config(state="disabled")
+
+    # ---------------- «Порыться в прошлом» ----------------
+    def collect_past_lines(client_idx, channel, mode, value):
+        """Строки «прошлого» канала: байты файлов ДО границы запуска
+        наблюдателя, отфильтрованные по числу (последние value) или по
+        времени (value минут до запуска). Разбор — тот же parse_chat_line,
+        что и для живых строк."""
+        watchers = state.get("watchers") or []
+        if client_idx >= len(watchers) or watchers[client_idx] is None:
+            return []
+        w = watchers[client_idx]
+        pref = next(((p, pm) for n, p, pm in CHANNELS if n == channel), None)
+        if pref is None:
+            return []
+        prefix, is_pm = pref
+        lines = []
+        for path in w.current_paths(prefix, is_pm):
+            boundary = w.start_offsets.get(path)
+            if not boundary:
+                continue            # файла не было на момент запуска
+            try:
+                boundary = min(boundary, os.path.getsize(path))
+                with open(path, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    data = f.read(boundary)
+            except OSError:
+                continue
+            for line in data.splitlines():
+                line = line.strip()
+                if line and parse_chat_line(line):
+                    lines.append(line)
+        if mode == "minutes":
+            threshold = w.started_at - datetime.timedelta(minutes=value)
+            kept = []
+            for line in lines:
+                m = re.match(r"^\[(\d{2}):(\d{2}):(\d{2})\]", line)
+                if not m:
+                    continue
+                hh, mm, ss = (int(g) for g in m.groups())
+                cand = w.started_at.replace(hour=hh, minute=mm, second=ss)
+                # время строки «из будущего» — это вчерашняя полночь
+                if cand > w.started_at + datetime.timedelta(hours=12):
+                    cand -= datetime.timedelta(days=1)
+                if cand >= threshold:
+                    kept.append(line)
+            lines = kept
+        else:
+            lines = lines[-value:]
+        return lines
+
+    def dig_past(client_idx, channel, mode, value, pos):
+        """Раскопать «прошлое» канала: строки до запуска уходят в тот же
+        переводчик, что и живые сообщения; результат выводится блоком со
+        своей раскраской в начало или в конец текущего чата."""
+        lines = collect_past_lines(client_idx, channel, mode, value)
+        key = (client_idx, channel)
+        header = (tr("dig_header_minutes", n=value) if mode == "minutes"
+                  else tr("dig_header_count", n=value))
+        # токен отсекает хвосты предыдущей раскопки, если кнопку нажали снова
+        block = {"entries": [], "pos": pos, "header": header,
+                 "token": object(), "shown": False}
+        past[key] = block
+        raw = state.get("raw")
+        if not lines or raw is None:
+            block["header"] = tr("dig_empty")
+            block["shown"] = True
+            rebuild_channel(client_idx, channel)
+            return
+        for line in lines:
+            raw.put(("line", client_idx, channel, line, block["token"]))
+
+    def append_past_done(token, client_idx, channel, entry):
+        """Очередная готовая строка «прошлого»: дополняем блок. Токен не
+        совпал — опоздавший результат снятой раскопки, игнорируем."""
+        key = (client_idx, channel)
+        block = past.get(key)
+        if block is None or block.get("token") is not token:
+            return
+        block["entries"].append(entry)
+        if client_idx >= len(clients_ui):
+            return
+        txt, _ = clients_ui[client_idx]["tabs"][channel]
+        if block.get("pos") == "end" and block.get("shown"):
+            # конец виджета — чужие строки не трогаем, вставка дешевле
+            # полной пересборки
+            at_end = float(txt.yview()[1]) > 0.99
+            txt.config(state="normal")
+            render_past_entry(txt, entry)
+            if at_end or not tab_visible(client_idx, channel):
+                txt.see("end")
+            txt.config(state="disabled")
+        else:
+            rebuild_channel(client_idx, channel)
+        block["shown"] = True
+
+    def open_dig_dialog():
+        """Окно «Порыться в прошлом»: глубина (число сообщений или минут
+        до запуска) и место вывода — начало или конец текущего чата."""
+        if not state.get("running"):
+            status_var.set(tr("dig_need_run"))
+            return
+        ci = current_client["idx"]
+        if ci >= len(clients_ui):
+            return
+        channel = active_channel(ci)
+        win = tk.Toplevel(root)
+        win.title(tr("dig_title"))
+        win.transient(root)
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+        cls = cfg.get("clients") or []
+        ch_label = channel
+        if len(cls) > 1 and ci < len(cls):
+            ch_label = (f"{cls[ci].get('name') or tr('client_default', n=ci + 1)}"
+                        f" · {channel}")
+        ttk.Label(frm, text=tr("dig_target", ch=ch_label)
+                  ).pack(anchor="w", pady=(0, 8))
+        mode_var = tk.StringVar(value="count")
+        pos_var = tk.StringVar(value="start")
+        val_var = tk.StringVar(value="20")
+        row1 = ttk.Frame(frm)
+        row1.pack(anchor="w")
+        ttk.Radiobutton(row1, text=tr("dig_mode_count"),
+                        variable=mode_var, value="count").pack(side="left")
+        ttk.Radiobutton(row1, text=tr("dig_mode_minutes"),
+                        variable=mode_var,
+                        value="minutes").pack(side="left", padx=(10, 0))
+        row2 = ttk.Frame(frm)
+        row2.pack(anchor="w", pady=(6, 0))
+        val_lbl = ttk.Label(row2, text=tr("dig_label_count"))
+        val_lbl.pack(side="left")
+        spin = ttk.Spinbox(row2, from_=1, to=500, textvariable=val_var,
+                           width=7)
+        spin.pack(side="left", padx=(6, 0))
+
+        def on_mode(*_):
+            if mode_var.get() == "minutes":
+                spin.config(to=10080)
+                val_lbl.config(text=tr("dig_label_minutes"))
+            else:
+                spin.config(to=500)
+                val_lbl.config(text=tr("dig_label_count"))
+        mode_var.trace_add("write", on_mode)
+        ttk.Label(frm, text=tr("dig_pos")).pack(anchor="w", pady=(8, 0))
+        row3 = ttk.Frame(frm)
+        row3.pack(anchor="w")
+        ttk.Radiobutton(row3, text=tr("dig_pos_start"),
+                        variable=pos_var,
+                        value="start").pack(side="left")
+        ttk.Radiobutton(row3, text=tr("dig_pos_end"),
+                        variable=pos_var,
+                        value="end").pack(side="left", padx=(10, 0))
+        row4 = ttk.Frame(frm)
+        row4.pack(anchor="e", pady=(12, 0))
+
+        def apply():
+            try:
+                value = int(val_var.get())
+            except ValueError:
+                value = 20
+            mode = mode_var.get()
+            value = max(1, min(value, 10080 if mode == "minutes" else 500))
+            dig_past(ci, channel, mode, value, pos_var.get())
+            win.destroy()
+        ttk.Button(row4, text=tr("dig_cancel"),
+                   command=win.destroy).pack(side="right")
+        ttk.Button(row4, text=tr("dig_show"),
+                   command=apply).pack(side="right", padx=(0, 8))
+        win.update_idletasks()
+        x = root.winfo_rootx() + max(0, (root.winfo_width()
+                                         - win.winfo_width()) // 2)
+        y = root.winfo_rooty() + max(0, (root.winfo_height()
+                                         - win.winfo_height()) // 3)
+        win.geometry(f"+{x}+{y}")
+        win.grab_set()          # модальное, как настройки
+        spin.focus_set()
+        win.wait_window(win)
 
     def refresh_view():
         """Перерисовать все вкладки (например, после переключения «Оригинал»)."""
@@ -3842,7 +4433,10 @@ def run_gui():
             if client_idx < len(clients_ui):
                 txt, _ = clients_ui[client_idx]["tabs"][channel]
                 starts = entry_starts.setdefault(txt, [])
-                if len(starts) >= overflow:
+                # инкрементальное удаление срезает строки сверху виджета —
+                # при блоке «прошлого» в начале он съест и его; тогда пересобираем всё
+                if len(starts) >= overflow and \
+                        (past.get(key) or {}).get("pos") != "start":
                     # инкрементально: удаляем из виджета только вытесненное,
                     # а не перерисовываем все 1000 записей заново
                     del starts[:overflow]
@@ -4038,6 +4632,12 @@ def run_gui():
                 if item[0] == "error":
                     status_var.set(f"Ошибка: {item[1]}")
                     continue
+                if item[0] == "past_done":
+                    _, token, ci2, ch2, t, name, body, translated, \
+                        src_lang = item
+                    append_past_done(token, ci2, ch2,
+                                     (t, name, body, translated, src_lang))
+                    continue
                 if item[0] != "done":
                     continue
                 _, client_idx, channel, t, name, body, translated, src_lang = item
@@ -4103,14 +4703,28 @@ def run_gui():
 
     def check_updates_silent():
         """Фоновая проверка обновлений; диалог — только если есть новее."""
+        run_update_check(manual=False)
+
+    def run_update_check(manual=False):
+        """Проверка релизов на GitHub. manual=True — по кнопке в настройках:
+        ответ в любом случае (ошибка сети / уже последняя / есть новее)."""
+        import tkinter.messagebox as mb
         def work():
             latest = check_latest_release()
             if latest is None:
+                if manual:
+                    root.after(0, lambda: mb.showwarning(
+                        tr("update_ask_title"), tr("update_check_failed"),
+                        parent=root))
                 return
             mine = parse_version(APP_VERSION)
             if mine is None or latest <= mine:
+                if manual:
+                    root.after(0, lambda: mb.showinfo(
+                        tr("update_ask_title"),
+                        tr("update_none", cur=APP_VERSION), parent=root))
                 return
-            root.after(0, lambda: offer_update(latest))
+            root.after(0, lambda: auto_update_flow(latest))
         threading.Thread(target=work, daemon=True).start()
 
     def offer_update(latest):
@@ -4124,6 +4738,120 @@ def run_gui():
                 os.startfile(RELEASES_PAGE)
             except Exception as exc:
                 log_debug(f"не удалось открыть страницу релизов: {exc!r}")
+
+    def shutdown_for_update():
+        """Аккуратный выход: потоки слежения и трей остановятся с процессом."""
+        log_debug("автообновление: завершение работы для замены exe")
+        stop_event.set()
+        try:
+            if tray_icon[0] is not None:
+                tray_icon[0].stop()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    def ask_download_update(newer):
+        """Вопрос перед скачиванием: «Да» / «Нет» + галочка «не напоминать».
+        Возвращает (скачать, не_напоминать). Скачивание закроет приложение,
+        поэтому вопрос — явный, со своим окном (нужна галочка, messagebox
+        её не умеет)."""
+        res = {}
+        win = tk.Toplevel(root)
+        win.title(tr("update_ask_title"))
+        win.transient(root)
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=tr("update_ask_msg", new=newer, cur=APP_VERSION),
+                  wraplength=340, justify="left").pack(anchor="w")
+        skip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frm, text=tr("update_ask_no_remind"),
+                        variable=skip_var).pack(anchor="w", pady=(8, 0))
+        row = ttk.Frame(frm)
+        row.pack(anchor="e", pady=(12, 0))
+
+        def done(download):
+            res["dl"] = download
+            res["skip"] = bool(skip_var.get())
+            win.destroy()
+        ttk.Button(row, text=tr("update_no"),
+                   command=lambda: done(False)).pack(side="right")
+        ttk.Button(row, text=tr("update_yes"),
+                   command=lambda: done(True)).pack(side="right", padx=(0, 8))
+        win.update_idletasks()
+        x = root.winfo_rootx() + max(0, (root.winfo_width()
+                                         - win.winfo_width()) // 2)
+        y = root.winfo_rooty() + max(0, (root.winfo_height()
+                                         - win.winfo_height()) // 3)
+        win.geometry(f"+{x}+{y}")
+        win.grab_set()
+        win.wait_window(win)
+        return bool(res.get("dl")), bool(res.get("skip"))
+
+    def auto_update_flow(latest):
+        """Новая версия найдена: либо скачать-установить-перезапустить
+        (опция в настройках и запуск из exe), либо предложить страницу релизов."""
+        if not cfg.get("auto_update") or not getattr(sys, "frozen", False):
+            offer_update(latest)
+            return
+        exe = sys.executable
+        tmp = exe + ".update"
+        newer = ".".join(str(x) for x in latest)
+        # галочка «не напоминать» от этой версии — не донимаем; для другой
+        # версии спросим снова
+        if cfg.get("update_skipped") == newer:
+            log_debug(f"автообновление: v{newer} пропущена пользователем")
+            return
+        # перед скачиванием — явный вопрос: это необратимо закроет приложение
+        download, dont_remind = ask_download_update(newer)
+        if not download:
+            if dont_remind:
+                cfg["update_skipped"] = newer
+                save_config(cfg)
+            log_debug(f"автообновление: пользователь отказался от v{newer} "
+                      f"(не напоминать: {dont_remind})")
+            return
+        win = tk.Toplevel(root)
+        win.title(tr("update_dl_title"))
+        win.transient(root)
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        lbl = ttk.Label(win, text=tr("update_downloading", ver=newer),
+                        padding=14, wraplength=320, justify="left")
+        lbl.pack()
+        win.update_idletasks()
+        log_debug(f"автообновление: скачивание v{newer}")
+
+        def work():
+            ok = download_update(tmp)
+            root.after(0, lambda: finish(ok))
+
+        def finish(ok):
+            if not ok:
+                log_debug("автообновление: скачивание не удалось")
+                try:
+                    win.destroy()
+                except tk.TclError:
+                    pass
+                offer_update(latest)    # хотя бы страницу релизов откроем
+                return
+            if not spawn_update_helper(exe, tmp):
+                try:
+                    win.destroy()
+                except tk.TclError:
+                    pass
+                offer_update(latest)
+                return
+            lbl.config(text=tr("update_restarting"))
+            win.update_idletasks()
+            log_debug("автообновление: помощник запущен, перезапуск")
+            # помощник уже ждёт нашего выхода
+            root.after(900, shutdown_for_update)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------------- диалог настроек перевода ----------------
     def open_settings_dialog():
@@ -4140,6 +4868,7 @@ def run_gui():
         lang_var = tk.BooleanVar(value=bool(cfg.get("translate_lang_channels")))
         cur_var = tk.BooleanVar(value=bool(cfg.get("translate_currency", True)))
         copy_var = tk.BooleanVar(value=bool(cfg.get("auto_copy_reply", True)))
+        upd_var = tk.BooleanVar(value=bool(cfg.get("auto_update")))
         snd_ids = list(BUILTIN_SOUNDS)
         snd_names = [tr(f"snd_{s}") for s in snd_ids]
         cur_snd = cfg.get("sound") or "beep"
@@ -4151,6 +4880,7 @@ def run_gui():
             cfg["translate_lang_channels"] = bool(lang_var.get())
             cfg["translate_currency"] = bool(cur_var.get())
             cfg["auto_copy_reply"] = bool(copy_var.get())
+            cfg["auto_update"] = bool(upd_var.get())
             save_config(cfg)
 
         def apply_sound(_e=None):
@@ -4172,6 +4902,14 @@ def run_gui():
         ttk.Checkbutton(box, text=tr("opt_auto_copy"),
                         variable=copy_var, command=apply).pack(anchor="w",
                                                                pady=2)
+        ttk.Checkbutton(box, text=tr("opt_auto_update"),
+                        variable=upd_var, command=apply).pack(anchor="w",
+                                                            pady=2)
+        # ручная проверка: результат — сообщение (нет новее / ошибка сети)
+        # или тот же вопрос про скачивание, что и при автопроверке
+        ttk.Button(box, text=tr("btn_check_updates"),
+                   command=lambda: run_update_check(manual=True)
+                   ).pack(anchor="w", padx=(22, 0), pady=(0, 4))
         snd_row = ttk.Frame(box)
         snd_row.pack(anchor="w", pady=(6, 2), fill="x")
         ttk.Label(snd_row, text=tr("opt_sound")).pack(side="left")
@@ -5166,6 +5904,23 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] упоминание имени: {exc}")
+    # скрипт помощника автообновления: пути экранированы, все шаги на месте
+    try:
+        s = build_update_script(r"C:\My Apps\WCT.exe",
+                                r"C:\My Apps\WCT.exe.update", 1234)
+        good = ("Wait-Process -Id 1234" in s
+                and "Move-Item -LiteralPath 'C:\\My Apps\\WCT.exe' "
+                    "-Destination 'C:\\My Apps\\WCT.exe.bak'" in s
+                and "'C:\\My Apps\\WCT.exe.update' -Destination "
+                    "'C:\\My Apps\\WCT.exe'" in s
+                and "Start-Process 'C:\\My Apps\\WCT.exe'" in s
+                and "catch" in s)
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] автообновление: скрипт "
+              f"помощника — ожидание, замена, запуск, откат")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] автообновление: {exc}")
     # i18n: у всех языков полный набор ключей, названия — на родных языках
     try:
         ref = set(I18N["ru"])

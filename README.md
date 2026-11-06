@@ -46,6 +46,8 @@
 
 ## Что нового
 
+**[v1.7.7.0](../../releases/tag/v1.7.7.0)** — автообновление: переводчик сам узнаёт о новых версиях (при запуске и кнопкой «Проверить обновления» в настройках), перед скачиванием спрашивает «Скачать и установить?» с кнопками Да/Нет и галочкой «Не напоминать об этом обновлении»; «Да» — скачать, заменить exe и перезапуститься (вкл. по умолчанию). Кнопка «🕑 Прошлое»: вытаскивает из логов сообщения до запуска переводчика (последние N сообщений или за N минут до запуска, в начало или конец чата), старые строки переводятся тем же конвейером и выделяются раскраской — курсив на сепиевом фоне со строкой «⏳ Прошлое».
+
 **[v1.7.6.3](../../releases/tag/v1.7.6.3)** — окно последнего оповещения: при каждом срабатывании сигнала в правом нижнем углу всплывает окно с временем, каналом и текстом (кнопка «К сообщению» — переход на вкладку); сигналы теперь пробиваются всегда — их звук и уведомление не зависят от значков каналов, те управляют только обычными сообщениями.
 
 **[v1.7.6.1](../../releases/tag/v1.7.6.1)** — у каждого сигнала можно выбрать свой звук: щелчок по ячейке «Звук» в «Сигналах» открывает список «Выкл. / Как у канала / шесть встроенных звуков»; свой звук правила важнее канального, выбор сохраняется сразу.
@@ -155,6 +157,8 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.7.0](../../releases/tag/v1.7.7.0)** — atualização automática: o tradutor descobre novas versões sozinho (na inicialização e pelo botão «Verificar atualizações» nas configurações), pergunta «Baixar e instalar?» com Sim/Não e a opção «Não lembrar desta atualização»; «Sim» baixa, substitui o exe e reinicia (ativada por padrão). Botão «🕑 Passado»: recupera do log as mensagens anteriores ao início do tradutor (últimas N mensagens ou N minutos, no início ou no fim do chat), as linhas antigas passam pela mesma tradução e vêm destacadas — itálico em fundo sépia com a linha «⏳ Passado».
 
 **[v1.7.6.3](../../releases/tag/v1.7.6.3)** — janela do último alerta: a cada disparo de um sinal abre-se no canto inferior direito uma janela com a hora, o canal e o texto (botão «Ir para a mensagem» leva até a aba); os sinais agora passam sempre — seu som e notificação não dependem dos ícones dos canais, que controlam apenas as mensagens comuns.
 

@@ -30,6 +30,11 @@ log_path = os.path.join(logs, f"_Local.{month}.txt")
 with open(log_path, "w", encoding="utf-8") as f:
     for i in range(1, 6):
         f.write(f"[21:0{i}:00] <Alice> old msg {i}\n")
+# «прошлое» второго канала — раскопка должна достать и его
+trade_path = os.path.join(logs, f"Trade.{month}.txt")
+with open(trade_path, "w", encoding="utf-8") as f:
+    for i in range(1, 3):
+        f.write(f"[21:1{i}:00] <Trader> trade old msg {i}\n")
 
 results = []
 
@@ -189,6 +194,18 @@ def step_check_past_style(root):
     check("блок «прошлого» в начале чата",
           bool(head) and bool(first_old)
           and txt.compare(head, "<", first_old))
+    # раскопка шла по ВСЕМ каналам: блок есть и во вкладке Trade
+    trade_txt = next((w for w in walk(root)
+                      if isinstance(w, tk.Text)
+                      and "trade old msg" in w.get("1.0", "end")), None)
+    check("вкладка Trade получила свой блок", trade_txt is not None)
+    if trade_txt is not None:
+        tcontent = trade_txt.get("1.0", "end")
+        check("Trade: заголовок есть", "⏳ Прошлое" in tcontent)
+        check("Trade: обе строки выгружены",
+              "trade old msg 1" in tcontent and "trade old msg 2" in tcontent)
+        check("Trade: стиль past проставлен",
+              bool(trade_txt.tag_ranges("past")))
 
 
 script = [step_noop, step_noop,            # ждём автостарт слежения (+300 мс)

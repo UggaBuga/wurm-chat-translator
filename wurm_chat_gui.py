@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.7.0"
+APP_VERSION = "1.7.7.2"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -458,9 +458,14 @@ TRANSLATE_INTERVAL = 1.0  # пауза между запросами, чтобы
 # Реальный формат логов Wurm Online:
 #   [19:13:45] <Uggabuga> guards!              — обычные каналы и ЛС
 #   [17:38:41] Uggabuga has reached 30 ... !   — системные строки без имени
-RE_NAME = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})\]\s*<([^<>\r\n]+)>\s*(.*\S)\s*$")
-RE_SYS = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})\]\s*(.+?\S)\s*$")
-RE_COLON = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})\]\s*([^\s:\[\]]{2,30}):\s*(.*\S)\s*$")
+# Тела ([\s\S], а не .) специально пропускают \n: многострочные сообщения
+# игры лежат в логе несколькими физическими строками и собираются обратно
+# reassemble_lines() до разбора.
+RE_NAME = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})\]\s*<([^<>\r\n]+)>\s*([\s\S]*\S)\s*$")
+RE_SYS = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})\]\s*([\s\S]+?\S)\s*$")
+RE_COLON = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})\]\s*([^\s:\[\]]{2,30}):\s*([\s\S]*\S)\s*$")
+# строка с меткой времени — начало нового сообщения (граница для сборки)
+RE_TS_LINE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\]")
 
 NAME_TOKEN_RE = re.compile(r"(<[^<>\r\n]+>)")
 
@@ -700,6 +705,21 @@ def parse_chat_line(line):
 def strip_log_prefix(line):
     return re.sub(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\]\s*", "",
                   line).strip()
+
+
+def reassemble_lines(lines):
+    """Физические строки лога -> сообщения. Строка без метки времени в
+    начале — продолжение предыдущего сообщения (многострочные сообщения
+    игры: стихи, объявления) — приклеивается к его телу через \\n.
+    Мусор до первого сообщения, как и раньше, отбрасывается."""
+    out = []
+    for line in lines:
+        line = line.rstrip("\r")
+        if RE_TS_LINE.match(line):
+            out.append(line)
+        elif line.strip() and out:
+            out[-1] += "\n" + line.strip()
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1190,10 +1210,12 @@ class LogWatcher(threading.Thread):
                     self.pending[path] = tail
                 else:
                     complete, self.pending[path] = [], buf
-                for line in complete:
-                    line = line.strip()
-                    if line and parse_chat_line(line):
-                        self.out.put(("line", self.client_idx, name, line))
+                # многострочные сообщения (продолжения без метки времени)
+                # собираем обратно в одно сообщение, а не роняем хвосты
+                batch = [ln.strip() for ln in complete if ln.strip()]
+                for msg in reassemble_lines(batch):
+                    if parse_chat_line(msg):
+                        self.out.put(("line", self.client_idx, name, msg))
 
 
 # --------------------------------------------------------------------------- #
@@ -2184,10 +2206,10 @@ I18N = {
         "chk_on_top": "Поверх окон",
         "tab_menu_sound": "Звук из этого канала",
         "tab_menu_notify": "Уведомления из этого канала",
-        "tab_tt_sound_on": "Звук на новые сообщения: вкл (клик — выкл)",
-        "tab_tt_sound_off": "Звук на новые сообщения: выкл (клик — вкл)",
-        "tab_tt_notify_on": "Всплывающие уведомления: вкл (клик — выкл)",
-        "tab_tt_notify_off": "Всплывающие уведомления: выкл (клик — вкл)",
+        "tab_tt_sound_on": "Звук на новые сообщения: вкл (переключить — правая кнопка)",
+        "tab_tt_sound_off": "Звук на новые сообщения: выкл (переключить — правая кнопка)",
+        "tab_tt_notify_on": "Всплывающие уведомления: вкл (переключить — правая кнопка)",
+        "tab_tt_notify_off": "Всплывающие уведомления: выкл (переключить — правая кнопка)",
         "reply_label": "Ответ:",
         "ctx_reply": "Ответить",
         "btn_start": "▶ Старт",
@@ -2196,7 +2218,7 @@ I18N = {
         "btn_search": "🔍 Найти",
         "btn_dig": "🕑 Прошлое",
         "dig_title": "Порыться в прошлом",
-        "dig_target": "Канал: {ch}",
+        "dig_target": "Клиент: {ch}",
         "dig_mode_count": "последних сообщений",
         "dig_mode_minutes": "минут до запуска",
         "dig_label_count": "Сколько сообщений взять:",
@@ -2211,6 +2233,8 @@ I18N = {
         "dig_empty": "До запуска в этот канал никто не писал.",
         "dig_header_count": "⏳ Прошлое — последние {n} сообщений",
         "dig_header_minutes": "⏳ Прошлое — за {n} мин до запуска",
+        "dig_hint": "Перевод прошлых сообщений идёт построчно и не "
+                        "мгновен: ориентировочно секунда на сообщение.",
         "glossary_link": "Словарь",
         "no_clients_hint": "Клиенты не заданы. Нажмите «Клиенты…» и добавьте "
                            "папку логов …\\players\\<Игрок>\\logs",
@@ -2284,6 +2308,10 @@ I18N = {
         "glossary_save_err": "Ошибка сохранения: {exc}",
         "err_output": "Ошибка вывода: {exc}",
         "opt_sound": "Звук уведомлений:",
+        "opt_channels": "Звук и уведомления по каналам:",
+        "opt_ch_sound": "звук",
+        "opt_ch_notify": "уведомления",
+        "opt_channels_hint": "То же самое даёт правая кнопка мыши по вкладке канала.",
         "btn_play": "Прослушать",
         "tab_menu_sound_pick": "Звук этого канала",
         "sound_default": "Как общий",
@@ -2350,10 +2378,10 @@ I18N = {
         "chk_on_top": "Always on top",
         "tab_menu_sound": "Sound from this channel",
         "tab_menu_notify": "Notifications from this channel",
-        "tab_tt_sound_on": "Sound on new messages: on (click to turn off)",
-        "tab_tt_sound_off": "Sound on new messages: off (click to turn on)",
-        "tab_tt_notify_on": "Popup notifications: on (click to turn off)",
-        "tab_tt_notify_off": "Popup notifications: off (click to turn on)",
+        "tab_tt_sound_on": "Sound on new messages: on (right-click to toggle)",
+        "tab_tt_sound_off": "Sound on new messages: off (right-click to toggle)",
+        "tab_tt_notify_on": "Popup notifications: on (right-click to toggle)",
+        "tab_tt_notify_off": "Popup notifications: off (right-click to toggle)",
         "reply_label": "Reply:",
         "ctx_reply": "Reply",
         "btn_start": "▶ Start",
@@ -2362,7 +2390,7 @@ I18N = {
         "btn_search": "🔍 Find",
         "btn_dig": "🕑 Past",
         "dig_title": "Dig into the past",
-        "dig_target": "Channel: {ch}",
+        "dig_target": "Client: {ch}",
         "dig_mode_count": "last messages",
         "dig_mode_minutes": "minutes before startup",
         "dig_label_count": "How many messages to take:",
@@ -2377,6 +2405,8 @@ I18N = {
         "dig_empty": "Nobody wrote to this channel before startup.",
         "dig_header_count": "⏳ Past — last {n} messages",
         "dig_header_minutes": "⏳ Past — {n} min before startup",
+        "dig_hint": "Translating past messages takes a while — roughly one "
+                        "second per message.",
         "glossary_link": "Glossary",
         "no_clients_hint": "No clients set. Click “Clients…” and add a logs "
                            "folder …\\players\\<Player>\\logs",
@@ -2451,6 +2481,10 @@ I18N = {
         "glossary_save_err": "Save error: {exc}",
         "err_output": "Output error: {exc}",
         "opt_sound": "Notification sound:",
+        "opt_channels": "Sound and notifications per channel:",
+        "opt_ch_sound": "sound",
+        "opt_ch_notify": "notifications",
+        "opt_channels_hint": "Right-clicking a channel tab does the same.",
         "btn_play": "Play",
         "tab_menu_sound_pick": "Sound for this channel",
         "sound_default": "Same as global",
@@ -2517,10 +2551,10 @@ I18N = {
         "chk_on_top": "Sempre visível",
         "tab_menu_sound": "Som deste canal",
         "tab_menu_notify": "Notificações deste canal",
-        "tab_tt_sound_on": "Som em novas mensagens: ativado (clique para desativar)",
-        "tab_tt_sound_off": "Som em novas mensagens: desativado (clique para ativar)",
-        "tab_tt_notify_on": "Notificações pop-up: ativadas (clique para desativar)",
-        "tab_tt_notify_off": "Notificações pop-up: desativadas (clique para ativar)",
+        "tab_tt_sound_on": "Som em novas mensagens: ativado (botão direito para alternar)",
+        "tab_tt_sound_off": "Som em novas mensagens: desativado (botão direito para alternar)",
+        "tab_tt_notify_on": "Notificações pop-up: ativadas (botão direito para alternar)",
+        "tab_tt_notify_off": "Notificações pop-up: desativadas (botão direito para alternar)",
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
@@ -2529,7 +2563,7 @@ I18N = {
         "btn_search": "🔍 Buscar",
         "btn_dig": "🕑 Passado",
         "dig_title": "Cavar o passado",
-        "dig_target": "Canal: {ch}",
+        "dig_target": "Cliente: {ch}",
         "dig_mode_count": "últimas mensagens",
         "dig_mode_minutes": "minutos antes do início",
         "dig_label_count": "Quantas mensagens pegar:",
@@ -2544,6 +2578,8 @@ I18N = {
         "dig_empty": "Ninguém escreveu neste canal antes do início.",
         "dig_header_count": "⏳ Passado — últimas {n} mensagens",
         "dig_header_minutes": "⏳ Passado — {n} min antes do início",
+        "dig_hint": "Traduzir mensagens antigas leva um tempo — cerca de um "
+                        "segundo por mensagem.",
         "glossary_link": "Glossário",
         "no_clients_hint": "Sem clientes. Clique em «Clientes…» e adicione a "
                            "pasta de logs …\\players\\<Jogador>\\logs",
@@ -2620,6 +2656,10 @@ I18N = {
         "glossary_save_err": "Erro ao salvar: {exc}",
         "err_output": "Erro de saída: {exc}",
         "opt_sound": "Som de notificação:",
+        "opt_channels": "Som e notificações por canal:",
+        "opt_ch_sound": "som",
+        "opt_ch_notify": "notificações",
+        "opt_channels_hint": "O botão direito sobre a aba do canal faz o mesmo.",
         "btn_play": "Ouvir",
         "tab_menu_sound_pick": "Som deste canal",
         "sound_default": "Como o geral",
@@ -2687,10 +2727,10 @@ I18N = {
         "chk_on_top": "Immer im Vordergrund",
         "tab_menu_sound": "Ton aus diesem Kanal",
         "tab_menu_notify": "Benachrichtigungen aus diesem Kanal",
-        "tab_tt_sound_on": "Ton bei neuen Nachrichten: an (Klick zum Ausschalten)",
-        "tab_tt_sound_off": "Ton bei neuen Nachrichten: aus (Klick zum Einschalten)",
-        "tab_tt_notify_on": "Pop-up-Benachrichtigungen: an (Klick zum Ausschalten)",
-        "tab_tt_notify_off": "Pop-up-Benachrichtigungen: aus (Klick zum Einschalten)",
+        "tab_tt_sound_on": "Ton bei neuen Nachrichten: an (Rechtsklick zum Umschalten)",
+        "tab_tt_sound_off": "Ton bei neuen Nachrichten: aus (Rechtsklick zum Umschalten)",
+        "tab_tt_notify_on": "Pop-up-Benachrichtigungen: an (Rechtsklick zum Umschalten)",
+        "tab_tt_notify_off": "Pop-up-Benachrichtigungen: aus (Rechtsklick zum Umschalten)",
         "reply_label": "Antwort:",
         "ctx_reply": "Antworten",
         "btn_start": "▶ Start",
@@ -2699,7 +2739,7 @@ I18N = {
         "btn_search": "🔍 Suchen",
         "btn_dig": "🕑 Vergangenheit",
         "dig_title": "In der Vergangenheit wühlen",
-        "dig_target": "Kanal: {ch}",
+        "dig_target": "Client: {ch}",
         "dig_mode_count": "letzte Nachrichten",
         "dig_mode_minutes": "Minuten vor dem Start",
         "dig_label_count": "Wie viele Nachrichten nehmen:",
@@ -2715,6 +2755,8 @@ I18N = {
                      "geschrieben.",
         "dig_header_count": "⏳ Vergangenheit — letzte {n} Nachrichten",
         "dig_header_minutes": "⏳ Vergangenheit — {n} Min. vor dem Start",
+        "dig_hint": "Das Übersetzen alter Nachrichten dauert — ungefähr eine "
+                        "Sekunde pro Nachricht.",
         "glossary_link": "Glossar",
         "no_clients_hint": "Keine Clients gesetzt. Klicken Sie auf „Clients…” "
                            "und fügen Sie einen Log-Ordner hinzu: "
@@ -2793,6 +2835,10 @@ I18N = {
         "glossary_save_err": "Speicherfehler: {exc}",
         "err_output": "Ausgabefehler: {exc}",
         "opt_sound": "Benachrichtigungston:",
+        "opt_channels": "Ton und Benachrichtigungen pro Kanal:",
+        "opt_ch_sound": "Ton",
+        "opt_ch_notify": "Benachrichtigungen",
+        "opt_channels_hint": "Ein Rechtsklick auf den Kanalreiter tut dasselbe.",
         "btn_play": "Anhören",
         "tab_menu_sound_pick": "Ton für diesen Kanal",
         "sound_default": "Wie global",
@@ -2860,10 +2906,10 @@ I18N = {
         "chk_on_top": "Siempre visible",
         "tab_menu_sound": "Sonido de este canal",
         "tab_menu_notify": "Notificaciones de este canal",
-        "tab_tt_sound_on": "Sonido en mensajes nuevos: activado (clic para desactivar)",
-        "tab_tt_sound_off": "Sonido en mensajes nuevos: desactivado (clic para activar)",
-        "tab_tt_notify_on": "Notificaciones emergentes: activadas (clic para desactivar)",
-        "tab_tt_notify_off": "Notificaciones emergentes: desactivadas (clic para activar)",
+        "tab_tt_sound_on": "Sonido en mensajes nuevos: activado (clic derecho para cambiar)",
+        "tab_tt_sound_off": "Sonido en mensajes nuevos: desactivado (clic derecho para cambiar)",
+        "tab_tt_notify_on": "Notificaciones emergentes: activadas (clic derecho para cambiar)",
+        "tab_tt_notify_off": "Notificaciones emergentes: desactivadas (clic derecho para cambiar)",
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
@@ -2872,7 +2918,7 @@ I18N = {
         "btn_search": "🔍 Buscar",
         "btn_dig": "🕑 Pasado",
         "dig_title": "Hurgar en el pasado",
-        "dig_target": "Canal: {ch}",
+        "dig_target": "Cliente: {ch}",
         "dig_mode_count": "últimos mensajes",
         "dig_mode_minutes": "minutos antes del inicio",
         "dig_label_count": "Cuántos mensajes tomar:",
@@ -2887,6 +2933,8 @@ I18N = {
         "dig_empty": "Nadie escribió en este canal antes del inicio.",
         "dig_header_count": "⏳ Pasado — últimos {n} mensajes",
         "dig_header_minutes": "⏳ Pasado — {n} min antes del inicio",
+        "dig_hint": "Traducir mensajes antiguos lleva un tiempo: aproximadamente "
+                        "un segundo por mensaje.",
         "glossary_link": "Glosario",
         "no_clients_hint": "Sin clientes. Pulse «Clientes…» y añada la carpeta "
                            "de logs …\\players\\<Jugador>\\logs",
@@ -2964,6 +3012,10 @@ I18N = {
         "glossary_save_err": "Error al guardar: {exc}",
         "err_output": "Error de salida: {exc}",
         "opt_sound": "Sonido de notificación:",
+        "opt_channels": "Sonido y notificaciones por canal:",
+        "opt_ch_sound": "sonido",
+        "opt_ch_notify": "notificaciones",
+        "opt_channels_hint": "El clic derecho en la pestaña del canal hace lo mismo.",
         "btn_play": "Escuchar",
         "tab_menu_sound_pick": "Sonido de este canal",
         "sound_default": "Como el general",
@@ -3031,10 +3083,10 @@ I18N = {
         "chk_on_top": "Toujours au premier plan",
         "tab_menu_sound": "Son de ce canal",
         "tab_menu_notify": "Notifications de ce canal",
-        "tab_tt_sound_on": "Son pour nouveaux messages : activé (clic pour désactiver)",
-        "tab_tt_sound_off": "Son pour nouveaux messages : désactivé (clic pour activer)",
-        "tab_tt_notify_on": "Notifications pop-up : activées (clic pour désactiver)",
-        "tab_tt_notify_off": "Notifications pop-up : désactivées (clic pour activer)",
+        "tab_tt_sound_on": "Son pour nouveaux messages : activé (clic droit pour changer)",
+        "tab_tt_sound_off": "Son pour nouveaux messages : désactivé (clic droit pour changer)",
+        "tab_tt_notify_on": "Notifications pop-up : activées (clic droit pour changer)",
+        "tab_tt_notify_off": "Notifications pop-up : désactivées (clic droit pour changer)",
         "reply_label": "Réponse :",
         "ctx_reply": "Répondre",
         "btn_start": "▶ Démarrer",
@@ -3043,7 +3095,7 @@ I18N = {
         "btn_search": "🔍 Chercher",
         "btn_dig": "🕑 Passé",
         "dig_title": "Fouiller dans le passé",
-        "dig_target": "Canal : {ch}",
+        "dig_target": "Client : {ch}",
         "dig_mode_count": "derniers messages",
         "dig_mode_minutes": "minutes avant le lancement",
         "dig_label_count": "Combien de messages prendre :",
@@ -3058,6 +3110,8 @@ I18N = {
         "dig_empty": "Personne n'a écrit dans ce canal avant le lancement.",
         "dig_header_count": "⏳ Passé — {n} derniers messages",
         "dig_header_minutes": "⏳ Passé — {n} min avant le lancement",
+        "dig_hint": "Traduire les anciens messages prend du temps — environ une "
+                        "seconde par message.",
         "glossary_link": "Glossaire",
         "no_clients_hint": "Aucun client défini. Cliquez sur « Clients… » et "
                            "ajoutez le dossier de logs …\\players\\<Joueur>\\logs",
@@ -3137,6 +3191,10 @@ I18N = {
         "glossary_save_err": "Erreur d'enregistrement : {exc}",
         "err_output": "Erreur de sortie : {exc}",
         "opt_sound": "Son de notification :",
+        "opt_channels": "Son et notifications par canal :",
+        "opt_ch_sound": "son",
+        "opt_ch_notify": "notifications",
+        "opt_channels_hint": "Un clic droit sur l'onglet du canal fait la même chose.",
         "btn_play": "Écouter",
         "tab_menu_sound_pick": "Son de ce canal",
         "sound_default": "Comme le réglage général",
@@ -3200,10 +3258,10 @@ I18N = {
         "chk_on_top": "置顶",
         "tab_menu_sound": "此频道的声音",
         "tab_menu_notify": "此频道的通知",
-        "tab_tt_sound_on": "新消息声音：开（点击关闭）",
-        "tab_tt_sound_off": "新消息声音：关（点击开启）",
-        "tab_tt_notify_on": "弹出通知：开（点击关闭）",
-        "tab_tt_notify_off": "弹出通知：关（点击开启）",
+        "tab_tt_sound_on": "新消息声音：开（右键切换）",
+        "tab_tt_sound_off": "新消息声音：关（右键切换）",
+        "tab_tt_notify_on": "弹出通知：开（右键切换）",
+        "tab_tt_notify_off": "弹出通知：关（右键切换）",
         "reply_label": "回复：",
         "ctx_reply": "回复",
         "btn_start": "▶ 开始",
@@ -3212,7 +3270,7 @@ I18N = {
         "btn_search": "🔍 搜索",
         "btn_dig": "🕑 过去",
         "dig_title": "挖掘过去",
-        "dig_target": "频道：{ch}",
+        "dig_target": "客户端：{ch}",
         "dig_mode_count": "最近的消息",
         "dig_mode_minutes": "启动前多少分钟",
         "dig_label_count": "取多少条消息：",
@@ -3226,6 +3284,7 @@ I18N = {
         "dig_empty": "启动前，此频道无人发言。",
         "dig_header_count": "⏳ 过去 — 最近 {n} 条消息",
         "dig_header_minutes": "⏳ 过去 — 启动前 {n} 分钟",
+        "dig_hint": "翻译过去的消息需要时间——大约每条消息一秒。",
         "glossary_link": "词典",
         "no_clients_hint": "尚未设置客户端。点击「客户端…」添加日志文件夹 "
                            "…\\players\\<玩家>\\logs",
@@ -3294,6 +3353,10 @@ I18N = {
         "glossary_save_err": "保存错误：{exc}",
         "err_output": "输出错误：{exc}",
         "opt_sound": "通知声音：",
+        "opt_channels": "各频道的声音和通知：",
+        "opt_ch_sound": "声音",
+        "opt_ch_notify": "通知",
+        "opt_channels_hint": "右键点击频道标签页可实现相同操作。",
         "btn_play": "试听",
         "tab_menu_sound_pick": "此频道的声音",
         "sound_default": "同全局",
@@ -3772,24 +3835,22 @@ def run_gui():
                 btn.bind("<Button-3>", lambda e, idx=i, ch=name:
                          channel_tab_menu(e, idx, ch))
                 tab_buttons[name] = btn
-                # значки разрешений канала, всегда на вкладке: клик
-                # переключает вкл/выкл. Звук — нота ♪, уведомления — конверт
-                # ✉: одна гарнитура, один размер и одинаковые цвета (тёмный =
-                # вкл, серый = выкл). При наведении — подсказка с состоянием.
+                # значки разрешений канала — ПАССИВНЫЕ индикаторы: кликать
+                # их нельзя (случайные нажатия мимо вкладки выключали звук
+                # незаметно для пользователя). Переключение — ПКМ по
+                # вкладке (channel_tab_menu) или в «Настройки». Звук — нота
+                # ♪, уведомления — конверт ✉: одна гарнитура, один размер
+                # и одинаковые цвета (тёмный = вкл, серый = выкл).
                 # Отступ — только между каналами.
-                ic_s = tk.Label(tabbar, text="♪", cursor="hand2",
+                ic_s = tk.Label(tabbar, text="♪",
                                 font=("Segoe UI Symbol", 9), fg="#b3b3b3")
-                ic_s.bind("<Button-1>", lambda _e, ch=name:
-                          toggle_channel_flag("sound_channels", ch))
                 widget_tooltip(
                     ic_s,
                     lambda ch=name: tr("tab_tt_sound_on")
                     if channel_flag(cfg.get("sound_channels"), ch)
                     else tr("tab_tt_sound_off"))
-                ic_n = tk.Label(tabbar, text="✉", cursor="hand2",
+                ic_n = tk.Label(tabbar, text="✉",
                                 font=("Segoe UI Symbol", 9), fg="#b3b3b3")
-                ic_n.bind("<Button-1>", lambda _e, ch=name:
-                          toggle_channel_flag("notify_channels", ch))
                 widget_tooltip(
                     ic_n,
                     lambda ch=name: tr("tab_tt_notify_on")
@@ -3839,7 +3900,8 @@ def run_gui():
                     pass
 
     def toggle_channel_flag(key, channel):
-        """Клик по значку вкладки: вкл/выкл звука или уведомлений канала."""
+        """Вкл/выкл звука или уведомлений канала (контекстное меню
+        вкладки, зеркало в «Настройках»)."""
         set_channel_flag(cfg, key, channel,
                          not channel_flag(cfg.get(key), channel))
         save_config(cfg)
@@ -4002,21 +4064,27 @@ def run_gui():
     # ---------------- нижняя панель ----------------
     bottom = ttk.Frame(root)
     bottom.pack(fill="x", padx=8, pady=(2, 8))
+    # два ряда: статус — отдельно, чтобы длинный текст статуса не вытеснял
+    # кнопки поиска/раскопок за край окна на узкой ширине
+    status_row = ttk.Frame(bottom)
+    status_row.pack(fill="x")
+    controls_row = ttk.Frame(bottom)
+    controls_row.pack(fill="x", pady=(2, 0))
     status_var = tk.StringVar(value=tr("status_stopped"))
-    ttk.Label(bottom, textvariable=status_var).pack(side="left")
+    ttk.Label(status_row, textvariable=status_var).pack(side="left")
     # номер версии — тихий уголок справа; рядом неприметная ссылка на словарь.
     # Словарь — механизм пост-обработки только для русского направления,
     # поэтому ссылку показываем лишь когда перевод идёт на русский.
-    ttk.Label(bottom, text=f"v{APP_VERSION}",
+    ttk.Label(status_row, text=f"v{APP_VERSION}",
               foreground="#999999").pack(side="right", padx=(4, 0))
     if target_lang == "ru":
-        glossary_link = tk.Label(bottom, text=tr("glossary_link"), fg="#7a9cc4",
+        glossary_link = tk.Label(status_row, text=tr("glossary_link"), fg="#7a9cc4",
                                  cursor="hand2", font=("Segoe UI", 8))
         glossary_link.pack(side="right", padx=(4, 4))
         glossary_link.bind("<Button-1>",
                            lambda _e: open_glossary_editor(root, target_lang))
-    run_btn = ttk.Button(bottom, text=tr("btn_start"))
-    run_btn.pack(side="right", padx=4)
+    run_btn = ttk.Button(controls_row, text=tr("btn_start"))
+    run_btn.pack(side="right", padx=(4, 0))
     def clear_all():
         for key in list(history):
             history[key].clear()
@@ -4027,8 +4095,8 @@ def run_gui():
                 w.config(state="disabled")
                 entry_starts[w] = []
 
-    clear_btn = ttk.Button(bottom, text=tr("btn_clear"), command=clear_all)
-    clear_btn.pack(side="right")
+    clear_btn = ttk.Button(controls_row, text=tr("btn_clear"), command=clear_all)
+    clear_btn.pack(side="right", padx=4)
 
     # ---------------- поиск по истории ----------------
     def do_search(event=None):
@@ -4111,13 +4179,14 @@ def run_gui():
                   foreground="#666666").pack(anchor="w", padx=6, pady=2)
 
     search_var = tk.StringVar()
-    search_entry = ttk.Entry(bottom, textvariable=search_var, width=24)
-    search_entry.pack(side="left", padx=(12, 2))
+    search_entry = ttk.Entry(controls_row, textvariable=search_var, width=24)
+    search_entry.pack(side="left", padx=(0, 2))
     search_entry.bind("<Return>", do_search)
-    ttk.Button(bottom, text=tr("btn_search"), command=do_search).pack(side="left")
+    ttk.Button(controls_row, text=tr("btn_search"),
+               command=do_search).pack(side="left")
     # «Порыться в прошлом»: строки лога до запуска переводчика блоком
     # со своей раскраской; lambda — функция объявлена ниже по файлу
-    ttk.Button(bottom, text=tr("btn_dig"),
+    ttk.Button(controls_row, text=tr("btn_dig"),
                command=lambda: open_dig_dialog()
                ).pack(side="left", padx=(10, 0))
 
@@ -4261,10 +4330,10 @@ def run_gui():
                     data = f.read(boundary)
             except OSError:
                 continue
-            for line in data.splitlines():
-                line = line.strip()
-                if line and parse_chat_line(line):
-                    lines.append(line)
+            batch = [ln.strip() for ln in data.splitlines() if ln.strip()]
+            for msg in reassemble_lines(batch):
+                if parse_chat_line(msg):
+                    lines.append(msg)
         if mode == "minutes":
             threshold = w.started_at - datetime.timedelta(minutes=value)
             kept = []
@@ -4284,26 +4353,36 @@ def run_gui():
             lines = lines[-value:]
         return lines
 
-    def dig_past(client_idx, channel, mode, value, pos):
-        """Раскопать «прошлое» канала: строки до запуска уходят в тот же
-        переводчик, что и живые сообщения; результат выводится блоком со
-        своей раскраской в начало или в конец текущего чата."""
-        lines = collect_past_lines(client_idx, channel, mode, value)
-        key = (client_idx, channel)
+    def dig_past(client_idx, mode, value, pos):
+        """Раскопать «прошлое» ВСЕХ каналов клиента: строки каждого канала
+        до запуска уходят в тот же переводчик, что и живые сообщения;
+        каждый канал получает свой блок со своей раскраской в начало или
+        в конец своего чата. Прошлая раскопка этого клиента снимается
+        целиком, со всех каналов."""
         header = (tr("dig_header_minutes", n=value) if mode == "minutes"
                   else tr("dig_header_count", n=value))
-        # токен отсекает хвосты предыдущей раскопки, если кнопку нажали снова
-        block = {"entries": [], "pos": pos, "header": header,
-                 "token": object(), "shown": False}
-        past[key] = block
+        # один токен на всю раскопку: отсекает хвосты предыдущей, если
+        # кнопку нажали снова, пока шёл перевод
+        token = object()
         raw = state.get("raw")
-        if not lines or raw is None:
-            block["header"] = tr("dig_empty")
-            block["shown"] = True
+        found = False
+        for channel, _prefix, _pm in CHANNELS:
+            past.pop((client_idx, channel), None)
+            lines = collect_past_lines(client_idx, channel, mode, value)
+            if not lines or raw is None:
+                continue
+            found = True
+            past[(client_idx, channel)] = {
+                "entries": [], "pos": pos, "header": header,
+                "token": token, "shown": False}
+            for line in lines:
+                raw.put(("line", client_idx, channel, line, token))
+        # старые блоки сняты со всех каналов — перерисовать каждую вкладку,
+        # иначе снятый блок останется на экране до следующего сообщения
+        for channel, _prefix, _pm in CHANNELS:
             rebuild_channel(client_idx, channel)
-            return
-        for line in lines:
-            raw.put(("line", client_idx, channel, line, block["token"]))
+        if not found:
+            status_var.set(tr("dig_empty"))
 
     def append_past_done(token, client_idx, channel, entry):
         """Очередная готовая строка «прошлого»: дополняем блок. Токен не
@@ -4331,14 +4410,14 @@ def run_gui():
 
     def open_dig_dialog():
         """Окно «Порыться в прошлом»: глубина (число сообщений или минут
-        до запуска) и место вывода — начало или конец текущего чата."""
+        до запуска) и место вывода — начало или конец чатов. Копается по
+        всем каналам сразу: блок в каждой вкладке из её собственного лога."""
         if not state.get("running"):
             status_var.set(tr("dig_need_run"))
             return
         ci = current_client["idx"]
         if ci >= len(clients_ui):
             return
-        channel = active_channel(ci)
         win = tk.Toplevel(root)
         win.title(tr("dig_title"))
         win.transient(root)
@@ -4346,12 +4425,10 @@ def run_gui():
         frm = ttk.Frame(win, padding=12)
         frm.pack(fill="both", expand=True)
         cls = cfg.get("clients") or []
-        ch_label = channel
         if len(cls) > 1 and ci < len(cls):
-            ch_label = (f"{cls[ci].get('name') or tr('client_default', n=ci + 1)}"
-                        f" · {channel}")
-        ttk.Label(frm, text=tr("dig_target", ch=ch_label)
-                  ).pack(anchor="w", pady=(0, 8))
+            ttk.Label(frm, text=tr("dig_target", ch=cls[ci].get("name")
+                                   or tr("client_default", n=ci + 1))
+                      ).pack(anchor="w", pady=(0, 8))
         mode_var = tk.StringVar(value="count")
         pos_var = tk.StringVar(value="start")
         val_var = tk.StringVar(value="20")
@@ -4387,8 +4464,10 @@ def run_gui():
         ttk.Radiobutton(row3, text=tr("dig_pos_end"),
                         variable=pos_var,
                         value="end").pack(side="left", padx=(10, 0))
+        ttk.Label(frm, text=tr("dig_hint"), foreground="#777777",
+                  wraplength=300, justify="left").pack(anchor="w", pady=(8, 0))
         row4 = ttk.Frame(frm)
-        row4.pack(anchor="e", pady=(12, 0))
+        row4.pack(anchor="e", pady=(8, 0))
 
         def apply():
             try:
@@ -4397,7 +4476,7 @@ def run_gui():
                 value = 20
             mode = mode_var.get()
             value = max(1, min(value, 10080 if mode == "minutes" else 500))
-            dig_past(ci, channel, mode, value, pos_var.get())
+            dig_past(ci, mode, value, pos_var.get())
             win.destroy()
         ttk.Button(row4, text=tr("dig_cancel"),
                    command=win.destroy).pack(side="right")
@@ -4919,6 +4998,40 @@ def run_gui():
         snd_combo.bind("<<ComboboxSelected>>", apply_sound)
         ttk.Button(snd_row, text=tr("btn_play"),
                    command=play_selected).pack(side="left")
+        # зеркало переключателей каналов: те же флаги, что и в контекстном
+        # меню вкладки (ПКМ). Галочка — set_channel_flag + сохранение +
+        # обновление пассивных значков на вкладках
+        ttk.Label(box, text=tr("opt_channels")).pack(anchor="w", pady=(10, 2))
+        ch_grid = ttk.Frame(box)
+        ch_grid.pack(anchor="w")
+
+        def apply_ch_flag(key, channel, var):
+            set_channel_flag(cfg, key, channel, bool(var.get()))
+            save_config(cfg)
+            refresh_tab_marks()
+
+        for col, (channel, _prefix, _pm) in enumerate(CHANNELS):
+            cell = ttk.Frame(ch_grid)
+            cell.grid(row=0, column=col, padx=(0 if col == 0 else 12, 0),
+                      sticky="n")
+            ttk.Label(cell, text=channel, font=("Segoe UI", 8, "bold")
+                      ).pack(anchor="w")
+            vs = tk.BooleanVar(
+                value=channel_flag(cfg.get("sound_channels"), channel))
+            vn = tk.BooleanVar(
+                value=channel_flag(cfg.get("notify_channels"), channel))
+            ttk.Checkbutton(cell, text="♪ " + tr("opt_ch_sound"), variable=vs,
+                            command=lambda k="sound_channels", ch=channel,
+                            v=vs: apply_ch_flag(k, ch, v)
+                            ).pack(anchor="w")
+            ttk.Checkbutton(cell, text="✉ " + tr("opt_ch_notify"),
+                            variable=vn,
+                            command=lambda k="notify_channels", ch=channel,
+                            v=vn: apply_ch_flag(k, ch, v)
+                            ).pack(anchor="w")
+        ttk.Label(box, text=tr("opt_channels_hint"),
+                  foreground="#777777", wraplength=380).pack(anchor="w",
+                                                             pady=(6, 0))
         ttk.Label(box, text=tr("settings_hint"),
                   foreground="#777777", wraplength=380).pack(anchor="w",
                                                              pady=(10, 0))
@@ -5562,6 +5675,30 @@ def self_test():
         good = got == expected
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] parse: {line!r} -> {got}")
+    # многострочные сообщения: продолжения без метки времени собираются
+    # обратно в одно сообщение, а не выбрасываются
+    try:
+        joined = reassemble_lines([
+            "[15:34:52] <Viisi> Proverbs 27:2",
+            "  Let someone else praise you, and not your own mouth;",
+            "  an outsider, and not your own lips.",
+        ])
+        good = (len(joined) == 1
+                and parse_chat_line(joined[0])
+                == ("15:34:52", "Viisi",
+                    "Proverbs 27:2\n"
+                    "Let someone else praise you, and not your own mouth;\n"
+                    "an outsider, and not your own lips."))
+        # однострочные сообщения идут каждое своим элементом, мусор до
+        # первого сообщения по-прежнему отбрасывается
+        good &= reassemble_lines(["", "[10:00:00] <A> one", "[10:00:05] <B> two"]) == [
+            "[10:00:00] <A> one", "[10:00:05] <B> two"]
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] многострочные сообщения: "
+              f"продолжения приклеиваются к телу")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] многострочные сообщения: {exc}")
     try:
         _tr, lang = translate_auto("good evening friends")
         if not _tr:      # сети нет / сервисы лежат — не повод ронять самотест

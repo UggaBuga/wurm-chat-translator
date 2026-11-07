@@ -46,6 +46,8 @@
 
 ## Что нового
 
+**[v1.7.7.2](../../releases/tag/v1.7.7.2)** — значки ♪/✉ на вкладках каналов стали пассивными индикаторами: случайный клик мимо вкладки больше не выключает звук или уведомления незаметно. Переключать — правой кнопкой мыши по вкладке или в новой секции «Звук и уведомления по каналам» в настройках. В «Прошлом» добавлена сноска, что перевод старых сообщений не мгновенный (около секунды на сообщение).
+
 **[v1.7.7.0](../../releases/tag/v1.7.7.0)** — автообновление: переводчик сам узнаёт о новых версиях (при запуске и кнопкой «Проверить обновления» в настройках), перед скачиванием спрашивает «Скачать и установить?» с кнопками Да/Нет и галочкой «Не напоминать об этом обновлении»; «Да» — скачать, заменить exe и перезапуститься (вкл. по умолчанию). Кнопка «🕑 Прошлое»: вытаскивает из логов сообщения до запуска переводчика (последние N сообщений или за N минут до запуска, в начало или конец чата), старые строки переводятся тем же конвейером и выделяются раскраской — курсив на сепиевом фоне со строкой «⏳ Прошлое».
 
 **[v1.7.6.3](../../releases/tag/v1.7.6.3)** — окно последнего оповещения: при каждом срабатывании сигнала в правом нижнем углу всплывает окно с временем, каналом и текстом (кнопка «К сообщению» — переход на вкладку); сигналы теперь пробиваются всегда — их звук и уведомление не зависят от значков каналов, те управляют только обычными сообщениями.
@@ -157,6 +159,8 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.7.2](../../releases/tag/v1.7.7.2)** — os ícones ♪/✉ nas abas dos canais viraram indicadores passivos: um clique acidental fora da aba não desliga mais o som ou as notificações sem perceber. Para alternar: botão direito na aba ou a nova seção «Som e notificações por canal» nas configurações. Na janela «Passado», um aviso de que traduzir mensagens antigas não é instantâneo (cerca de um segundo por mensagem).
 
 **[v1.7.7.0](../../releases/tag/v1.7.7.0)** — atualização automática: o tradutor descobre novas versões sozinho (na inicialização e pelo botão «Verificar atualizações» nas configurações), pergunta «Baixar e instalar?» com Sim/Não e a opção «Não lembrar desta atualização»; «Sim» baixa, substitui o exe e reinicia (ativada por padrão). Botão «🕑 Passado»: recupera do log as mensagens anteriores ao início do tradutor (últimas N mensagens ou N minutos, no início ou no fim do chat), as linhas antigas passam pela mesma tradução e vêm destacadas — itálico em fundo sépia com a linha «⏳ Passado».
 

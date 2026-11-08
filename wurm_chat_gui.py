@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.7.2"
+APP_VERSION = "1.7.7.3"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -2267,6 +2267,8 @@ I18N = {
         "update_none": "У вас последняя версия ({cur}).",
         "update_check_failed": "Не удалось проверить обновления.\n"
                                "Проверьте подключение к сети.",
+        "update_download_failed": "Не удалось скачать обновление. \n"
+                               "Проверьте подключение к сети и повторите.",
         "update_ask_no_remind": "Не напоминать об этом обновлении",
         "update_yes": "Да",
         "update_no": "Нет",
@@ -2439,6 +2441,8 @@ I18N = {
         "update_none": "You have the latest version ({cur}).",
         "update_check_failed": "Couldn't check for updates.\n"
                                "Check your internet connection.",
+        "update_download_failed": "Could not download the update. \n"
+                               "Check your internet connection and try again.",
         "update_ask_no_remind": "Don't remind me about this update",
         "update_yes": "Yes",
         "update_no": "No",
@@ -2613,6 +2617,8 @@ I18N = {
         "update_none": "Você tem a versão mais recente ({cur}).",
         "update_check_failed": "Não foi possível verificar atualizações.\n"
                                "Verifique a conexão.",
+        "update_download_failed": "Não foi possível baixar a atualização. \n"
+                               "Verifique a conexão e tente novamente.",
         "update_ask_no_remind": "Não lembrar desta atualização",
         "update_yes": "Sim",
         "update_no": "Não",
@@ -2792,6 +2798,8 @@ I18N = {
         "update_none": "Sie haben die neueste Version ({cur}).",
         "update_check_failed": "Update-Prüfung fehlgeschlagen.\n"
                                "Verbindung prüfen.",
+        "update_download_failed": "Das Update konnte nicht heruntergeladen werden. \n"
+                               "Verbindung prüfen und erneut versuchen.",
         "update_ask_no_remind": "Nicht mehr an dieses Update erinnern",
         "update_yes": "Ja",
         "update_no": "Nein",
@@ -2969,6 +2977,8 @@ I18N = {
         "update_none": "Tienes la versión más reciente ({cur}).",
         "update_check_failed": "No se pudieron buscar actualizaciones.\n"
                                "Comprueba la conexión.",
+        "update_download_failed": "No se pudo descargar la actualización. \n"
+                               "Comprueba la conexión y reintenta.",
         "update_ask_no_remind": "No recordar esta actualización",
         "update_yes": "Sí",
         "update_no": "No",
@@ -3148,6 +3158,8 @@ I18N = {
         "update_none": "Vous avez la dernière version ({cur}).",
         "update_check_failed": "Échec de la recherche de mises à jour.\n"
                                "Vérifiez la connexion.",
+        "update_download_failed": "Impossible de télécharger la mise à jour. \n"
+                               "Vérifiez la connexion et réessayez.",
         "update_ask_no_remind": "Ne plus me rappeler cette mise à jour",
         "update_yes": "Oui",
         "update_no": "Non",
@@ -3315,6 +3327,8 @@ I18N = {
         "btn_check_updates": "检查更新",
         "update_none": "已是最新版本（{cur}）。",
         "update_check_failed": "检查更新失败。\n请检查网络连接。",
+        "update_download_failed": "下载更新失败。\n"
+                               "请检查网络连接后重试。",
         "update_ask_no_remind": "不再提醒此更新",
         "update_yes": "是",
         "update_no": "否",
@@ -4803,7 +4817,7 @@ def run_gui():
                         tr("update_ask_title"),
                         tr("update_none", cur=APP_VERSION), parent=root))
                 return
-            root.after(0, lambda: auto_update_flow(latest))
+            root.after(0, lambda: auto_update_flow(latest, manual=manual))
         threading.Thread(target=work, daemon=True).start()
 
     def offer_update(latest):
@@ -4870,14 +4884,18 @@ def run_gui():
         win.wait_window(win)
         return bool(res.get("dl")), bool(res.get("skip"))
 
-    def auto_update_flow(latest):
-        """Новая версия найдена: либо скачать-установить-перезапустить
-        (опция в настройках и запуск из exe), либо предложить страницу релизов."""
-        if not cfg.get("auto_update") or not getattr(sys, "frozen", False):
+    def auto_update_flow(latest, manual=False):
+        """Новая версия найдена: скачать-установить-перезапустить.
+        manual=True — запрос по кнопке «Проверить обновления»: полный флоу
+        даже при выключенной галочке автообновления (пользователь явно
+        попросил). Фоновая проверка при выключенной галочке молчит —
+        без диалогов и без переходов на сайт."""
+        if not getattr(sys, "frozen", False):
             offer_update(latest)
             return
-        exe = sys.executable
-        tmp = exe + ".update"
+        if not manual and not cfg.get("auto_update"):
+            log_debug("автообновление: есть новее, но галочка выключена")
+            return
         newer = ".".join(str(x) for x in latest)
         # галочка «не напоминать» от этой версии — не донимаем; для другой
         # версии спросим снова
@@ -4893,6 +4911,16 @@ def run_gui():
             log_debug(f"автообновление: пользователь отказался от v{newer} "
                       f"(не напоминать: {dont_remind})")
             return
+        download_and_restart(latest)
+
+    def download_and_restart(latest):
+        """Скачивание с окном прогресса, подмена exe и перезапуск. Неудача
+        скачивания — понятный вопрос «повторить?», а не молчаливый уход
+        на сайт GitHub."""
+        import tkinter.messagebox as mb
+        exe = sys.executable
+        tmp = exe + ".update"
+        newer = ".".join(str(x) for x in latest)
         win = tk.Toplevel(root)
         win.title(tr("update_dl_title"))
         win.transient(root)
@@ -4915,7 +4943,12 @@ def run_gui():
                     win.destroy()
                 except tk.TclError:
                     pass
-                offer_update(latest)    # хотя бы страницу релизов откроем
+                if mb.askretrycancel(tr("update_ask_title"),
+                                     tr("update_download_failed"),
+                                     parent=root):
+                    download_and_restart(latest)   # ещё одна попытка
+                else:
+                    offer_update(latest)    # крайний случай — страница релизов
                 return
             if not spawn_update_helper(exe, tmp):
                 try:

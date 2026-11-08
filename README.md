@@ -46,6 +46,8 @@
 
 ## Что нового
 
+**[v1.7.7.3](../../releases/tag/v1.7.7.3)** — обновление стало полностью автоматическим: кнопка «Проверить обновления» теперь всегда ведёт полный флоу скачивания и перезапуска (раньше при выключенной галочке автообновления отправляла на страницу релизов на GitHub); фоновая проверка при выключенной галочке молчит. Если скачивание не удалось — сообщение с предложением повторить, а не молчаливый переход на сайт.
+
 **[v1.7.7.2](../../releases/tag/v1.7.7.2)** — значки ♪/✉ на вкладках каналов стали пассивными индикаторами: случайный клик мимо вкладки больше не выключает звук или уведомления незаметно. Переключать — правой кнопкой мыши по вкладке или в новой секции «Звук и уведомления по каналам» в настройках. В «Прошлом» добавлена сноска, что перевод старых сообщений не мгновенный (около секунды на сообщение).
 
 **[v1.7.7.0](../../releases/tag/v1.7.7.0)** — автообновление: переводчик сам узнаёт о новых версиях (при запуске и кнопкой «Проверить обновления» в настройках), перед скачиванием спрашивает «Скачать и установить?» с кнопками Да/Нет и галочкой «Не напоминать об этом обновлении»; «Да» — скачать, заменить exe и перезапуститься (вкл. по умолчанию). Кнопка «🕑 Прошлое»: вытаскивает из логов сообщения до запуска переводчика (последние N сообщений или за N минут до запуска, в начало или конец чата), старые строки переводятся тем же конвейером и выделяются раскраской — курсив на сепиевом фоне со строкой «⏳ Прошлое».
@@ -159,6 +161,8 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.7.3](../../releases/tag/v1.7.7.3)** — a atualização ficou totalmente automática: o botão «Verificar atualizações» agora sempre faz o fluxo completo de download e reinício (antes, com a opção de autoatualização desligada, mandava para a página de releases no GitHub); a verificação em segundo plano com a opção desligada fica em silêncio. Se o download falhar — mensagem para tentar de novo, em vez de ir ao site em silêncio.
 
 **[v1.7.7.2](../../releases/tag/v1.7.7.2)** — os ícones ♪/✉ nas abas dos canais viraram indicadores passivos: um clique acidental fora da aba não desliga mais o som ou as notificações sem perceber. Para alternar: botão direito na aba ou a nova seção «Som e notificações por canal» nas configurações. Na janela «Passado», um aviso de que traduzir mensagens antigas não é instantâneo (cerca de um segundo por mensagem).
 

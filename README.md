@@ -106,6 +106,17 @@
 
 Только новые сообщения — история до запуска не подгружается.
 
+## Если после обновления ошибка «Failed to load Python DLL»
+
+Значит, антивирус (чаще всего Защитник Windows) удалил файл во время распаковки программы. Добавьте в его исключения:
+
+1. Папку, где лежит `WurmChatTranslator.exe` (например, `C:\Games\WurmChatTranslator`).
+2. Папку распаковки: нажмите Win+R, введите `%TEMP%` — добавьте в исключения маску `_MEI*` (папки вида `_MEI12345`).
+
+Как добавить: **Безопасность Windows → Защита от вирусов и угроз → Управление настройками → Исключения → Добавить или удалить исключения → Добавить исключение → Папка** (и отдельно маска `_MEI*` через «Добавить исключение»).
+
+После этого скачайте exe с [страницы релизов](../../releases) ещё раз и положите поверх старого.
+
 ## Сборка exe
 
 ```bash
@@ -231,6 +242,17 @@ Lista completa de mudanças — na [página de releases](../../releases).
 O `WurmChatTranslator.exe` pronto — baixar da [página de releases](../../releases) (ou compilar você mesmo, veja abaixo). O aplicativo já começa a acompanhar os logs; a pasta de logs é preenchida automaticamente.
 
 Apenas mensagens novas — o histórico antes do lançamento não é carregado.
+
+## Se após a atualização aparecer o erro «Failed to load Python DLL»
+
+Significa que o antivírus (mais frequentemente o Windows Defender) removeu um arquivo durante a extração do programa. Adicione às exclusões dele:
+
+1. A pasta onde está o `WurmChatTranslator.exe` (por exemplo, `C:\Games\WurmChatTranslator`).
+2. A pasta de extração: pressione Win+R, digite `%TEMP%` — adicione a máscara `_MEI*` (pastas como `_MEI12345`).
+
+Como adicionar: **Segurança do Windows → Proteção contra vírus e ameaças → Gerenciar configurações → Exclusões → Adicionar ou remover exclusões → Adicionar exclusão → Pasta** (e a máscara `_MEI*` separadamente em «Adicionar exclusão»).
+
+Depois baixe o exe da [página de releases](../../releases) novamente e coloque por cima do antigo.
 
 ## Compilando o exe
 

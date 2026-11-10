@@ -46,6 +46,8 @@
 
 ## Что нового
 
+**[v1.7.7.8](../../releases/tag/v1.7.7.8)** — автообновление стало надёжнее: скачанный файл сверяется по точному размеру с GitHub и заголовку exe, битый файл не подменит рабочий. Если после обновления новая версия не запускается (падение или ошибка загрузки) — старая возвращается автоматически.
+
 **[v1.7.7.7](../../releases/tag/v1.7.7.7)** — национальные чаты («Russian GL» и аналоги на других языках) по умолчанию больше не переводятся: они сразу попадают в список каналов без перевода, отдельная опция «переводить языковые чаты» убрана. В каналах без перевода между сообщениями больше нет пустой строки.
 
 **[v1.7.7.6](../../releases/tag/v1.7.7.6)** — у каждого канала появилась своя галочка перевода 🌐: включается и выключается в новой секции «Каналы: перевод, звук, уведомления» в настройках или правой кнопкой мыши по вкладке. Удобно, например, не переводить Event. Состояние запоминается между запусками.
@@ -169,6 +171,8 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.7.8](../../releases/tag/v1.7.7.8)** — a atualização automática ficou mais confiável: o arquivo baixado é conferido pelo tamanho exato do GitHub e pelo cabeçalho do exe, um arquivo corrompido não substitui o funcionamento. Se a nova versão não iniciar após a atualização (queda ou erro de carregamento) — a versão anterior volta automaticamente.
 
 **[v1.7.7.7](../../releases/tag/v1.7.7.7)** — os chats nacionais («Russian GL» e equivalentes em outros idiomas) deixam de ser traduzidos por padrão: entram direto na lista de canais sem tradução, e a opção separada «traduzir chats de idiomas» foi removida. Nos canais sem tradução não há mais linha em branco entre as mensagens.
 

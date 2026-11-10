@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.7.7"
+APP_VERSION = "1.7.7.8"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -175,25 +175,56 @@ def parse_version(text):
     return tuple(int(p) for p in m.group(1).split(".")) if m else None
 
 
-def check_latest_release(timeout=8):
-    """Версия последнего релиза на GitHub или None (сеть/ошибка)."""
+def latest_release_info(timeout=8):
+    """(версия, размер exe-ассета) последнего релиза или None (сеть/ошибка).
+    Размер нужен, чтобы отсечь обрезанное скачивание."""
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         data = json.loads(_http_get(url, timeout=timeout))
-        return parse_version(data.get("tag_name") or data.get("name"))
+        ver = parse_version(data.get("tag_name") or data.get("name"))
+        size = None
+        for a in data.get("assets") or []:
+            if a.get("name") == "WurmChatTranslator.exe":
+                size = a.get("size")
+                break
+        return ver, size
     except Exception as exc:
         log_debug(f"проверка обновлений: не удалось: {exc!r}")
         return None
 
 
-def download_update(dest, timeout=240):
-    """Скачать exe последнего релиза в dest. True — файл на месте и не пуст."""
+def check_latest_release(timeout=8):
+    """Версия последнего релиза на GitHub или None (сеть/ошибка)."""
+    info = latest_release_info(timeout=timeout)
+    return info[0] if info else None
+
+
+def _file_is_valid_exe(path, expected_size=None):
+    """Скачанный файл похож на целый exe: есть на диске, начинается с MZ,
+    размер больше 3 МБ и (если известен) совпадает с размером ассета."""
+    try:
+        if not os.path.isfile(path):
+            return False
+        size = os.path.getsize(path)
+        if size < 3_000_000:
+            return False
+        if expected_size and size != expected_size:
+            return False
+        with open(path, "rb") as f:
+            return f.read(2) == b"MZ"
+    except OSError:
+        return False
+
+
+def download_update(dest, timeout=240, expected_size=None):
+    """Скачать exe последнего релиза в dest. True — файл целый и похож на exe."""
     try:
         curl = _find_curl()
         if curl:
             cf = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             out = subprocess.run(
-                [curl, "-sS", "-L", "--max-time", str(timeout), "-A",
+                [curl, "-sS", "-f", "-L", "--retry", "2",
+                 "--max-time", str(timeout), "-A",
                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                  "-o", dest, LATEST_EXE_URL],
                 capture_output=True, creationflags=cf, timeout=timeout + 15)
@@ -213,9 +244,13 @@ def download_update(dest, timeout=240):
                     if not chunk:
                         break
                     f.write(chunk)
-        ok = os.path.isfile(dest) and os.path.getsize(dest) > 3_000_000
-        if not ok and os.path.isfile(dest):
-            os.remove(dest)
+        ok = _file_is_valid_exe(dest, expected_size)
+        if not ok:
+            if os.path.isfile(dest):
+                got = os.path.getsize(dest) if os.path.isfile(dest) else -1
+                log_debug(f"автообновление: файл не прошёл проверку "
+                          f"(размер {got}, ожидалось {expected_size})")
+                os.remove(dest)
         return ok
     except Exception as exc:
         log_debug(f"автообновление: скачивание не удалось: {exc!r}")
@@ -233,15 +268,27 @@ def _ps_quote(path):
 
 
 def build_update_script(exe, tmp, pid):
-    """Скрипт помощника: дождаться выхода старой копии, подменить exe,
-    запустить новую. При неудаче — вернуть старую обратно. Процесс к этому
-    моменту может быть уже завершён — Get-Process/Wait-Process терпят это."""
+    """Скрипт помощника: дождаться выхода старой копии, проверить скачанный
+    файл (существует, начинается с MZ), подменить exe, запустить новую.
+    Первые 90 секунд наблюдаем за новым процессом: молчаливый падеж или
+    диалог загрузчика «Error» (битый exe/антивирур съел DLL) — вернуть
+    старую копию. Процесс к моменту старта может быть уже завершён —
+    Get-Process/Wait-Process терпят это."""
     bak = exe + ".bak"
     return f"""$ErrorActionPreference = 'Stop'
 $old = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue
 if ($old) {{ try {{ Wait-Process -Id {int(pid)} -Timeout 90 }} catch {{}} }}
 Start-Sleep -Milliseconds 800
 try {{
+  $valid = $false
+  try {{
+    $fs = [System.IO.File]::OpenRead('{_ps_quote(tmp)}')
+    $head = New-Object byte[] 2
+    $n = $fs.Read($head, 0, 2)
+    $fs.Close()
+    $valid = ($n -eq 2 -and $head[0] -eq 77 -and $head[1] -eq 90)
+  }} catch {{}}
+  if (-not $valid) {{ throw 'downloaded file is invalid' }}
   $moved = $false
   for ($i = 0; $i -lt 20; $i++) {{
     try {{
@@ -254,12 +301,30 @@ try {{
   }}
   if (-not $moved) {{ throw 'cannot replace exe' }}
   Move-Item -LiteralPath '{_ps_quote(tmp)}' -Destination '{_ps_quote(exe)}' -Force
-  Start-Process '{_ps_quote(exe)}'
-  Remove-Item -LiteralPath '{_ps_quote(bak)}' -Force -ErrorAction SilentlyContinue
+  $proc = Start-Process '{_ps_quote(exe)}' -PassThru
+  $restored = $false
+  for ($i = 0; $i -lt 45; $i++) {{
+    Start-Sleep -Seconds 2
+    try {{ $proc.Refresh() }} catch {{}}
+    if ($proc.HasExited) {{ $restored = $true; break }}
+    if ($proc.MainWindowTitle -eq 'Error') {{
+      try {{ $proc.Kill() }} catch {{}}
+      $restored = $true
+      break
+    }}
+    if ($proc.MainWindowTitle -like '*Wurm*') {{ break }}
+  }}
+  if ($restored) {{
+    Start-Sleep -Milliseconds 500
+    Move-Item -LiteralPath '{_ps_quote(bak)}' -Destination '{_ps_quote(exe)}' -Force
+  }} else {{
+    Remove-Item -LiteralPath '{_ps_quote(bak)}' -Force -ErrorAction SilentlyContinue
+  }}
 }} catch {{
   if (Test-Path -LiteralPath '{_ps_quote(bak)}') {{
     Move-Item -LiteralPath '{_ps_quote(bak)}' -Destination '{_ps_quote(exe)}' -Force -ErrorAction SilentlyContinue
   }}
+  Remove-Item -LiteralPath '{_ps_quote(tmp)}' -Force -ErrorAction SilentlyContinue
 }}
 Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
 """
@@ -4925,13 +4990,14 @@ def run_gui():
         ответ в любом случае (ошибка сети / уже последняя / есть новее)."""
         import tkinter.messagebox as mb
         def work():
-            latest = check_latest_release()
-            if latest is None:
+            info = latest_release_info()
+            if info is None:
                 if manual:
                     root.after(0, lambda: mb.showwarning(
                         tr("update_ask_title"), tr("update_check_failed"),
                         parent=root))
                 return
+            latest, asset_size = info
             mine = parse_version(APP_VERSION)
             if mine is None or latest <= mine:
                 if manual:
@@ -4939,7 +5005,8 @@ def run_gui():
                         tr("update_ask_title"),
                         tr("update_none", cur=APP_VERSION), parent=root))
                 return
-            root.after(0, lambda: auto_update_flow(latest, manual=manual))
+            root.after(0, lambda: auto_update_flow(
+                latest, manual=manual, asset_size=asset_size))
         threading.Thread(target=work, daemon=True).start()
 
     def offer_update(latest):
@@ -5006,12 +5073,13 @@ def run_gui():
         win.wait_window(win)
         return bool(res.get("dl")), bool(res.get("skip"))
 
-    def auto_update_flow(latest, manual=False):
+    def auto_update_flow(latest, manual=False, asset_size=None):
         """Новая версия найдена: скачать-установить-перезапустить.
         manual=True — запрос по кнопке «Проверить обновления»: полный флоу
         даже при выключенной галочке автообновления (пользователь явно
         попросил). Фоновая проверка при выключенной галочке молчит —
-        без диалогов и без переходов на сайт."""
+        без диалогов и без переходов на сайт. asset_size — размер exe-ассета
+        из API, для проверки целостности скачивания."""
         if not getattr(sys, "frozen", False):
             offer_update(latest)
             return
@@ -5033,9 +5101,9 @@ def run_gui():
             log_debug(f"автообновление: пользователь отказался от v{newer} "
                       f"(не напоминать: {dont_remind})")
             return
-        download_and_restart(latest)
+        download_and_restart(latest, asset_size=asset_size)
 
-    def download_and_restart(latest):
+    def download_and_restart(latest, asset_size=None):
         """Скачивание с окном прогресса, подмена exe и перезапуск. Неудача
         скачивания — понятный вопрос «повторить?», а не молчаливый уход
         на сайт GitHub."""
@@ -5055,7 +5123,7 @@ def run_gui():
         log_debug(f"автообновление: скачивание v{newer}")
 
         def work():
-            ok = download_update(tmp)
+            ok = download_update(tmp, expected_size=asset_size)
             root.after(0, lambda: finish(ok))
 
         def finish(ok):
@@ -5068,7 +5136,7 @@ def run_gui():
                 if mb.askretrycancel(tr("update_ask_title"),
                                      tr("update_download_failed"),
                                      parent=root):
-                    download_and_restart(latest)   # ещё одна попытка
+                    download_and_restart(latest, asset_size=asset_size)
                 else:
                     offer_update(latest)    # крайний случай — страница релизов
                 return
@@ -6417,18 +6485,62 @@ def self_test():
         s = build_update_script(r"C:\My Apps\WCT.exe",
                                 r"C:\My Apps\WCT.exe.update", 1234)
         good = ("Wait-Process -Id 1234" in s
+                and "byte[] 2" in s
+                and "$head[0] -eq 77" in s
                 and "Move-Item -LiteralPath 'C:\\My Apps\\WCT.exe' "
                     "-Destination 'C:\\My Apps\\WCT.exe.bak'" in s
                 and "'C:\\My Apps\\WCT.exe.update' -Destination "
                     "'C:\\My Apps\\WCT.exe'" in s
-                and "Start-Process 'C:\\My Apps\\WCT.exe'" in s
+                and "Start-Process 'C:\\My Apps\\WCT.exe' -PassThru" in s
+                and "$proc.HasExited" in s
+                and "MainWindowTitle -eq 'Error'" in s
                 and "catch" in s)
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] автообновление: скрипт "
-              f"помощника — ожидание, замена, запуск, откат")
+              f"помощника — ожидание, проверка MZ, замена, запуск, откат")
     except Exception as exc:
         ok = False
         print(f"  [FAIL] автообновление: {exc}")
+    # проверка целостности скачанного exe: MZ, минимальный размер,
+    # сверка с размером ассета из API
+    try:
+        import tempfile as _tf
+        fd_bad, bad = _tf.mkstemp()
+        with os.fdopen(fd_bad, "wb") as _f:
+            _f.write(b"MZ" + b"\0" * 100)
+        fd, good_f = _tf.mkstemp()
+        with os.fdopen(fd, "wb") as _f:
+            _f.write(b"MZ" + b"\0" * (3_500_000))
+        good = (not _file_is_valid_exe(bad)
+                and _file_is_valid_exe(good_f)
+                and _file_is_valid_exe(good_f, 3_500_002)
+                and not _file_is_valid_exe(good_f, 9_000_000)
+                and not _file_is_valid_exe(bad + ".missing"))
+        os.unlink(bad)
+        os.unlink(good_f)
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] автообновление: проверка "
+              f"целостности скачанного файла (MZ, размер)")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] автообновление: проверка файла: {exc}")
+    # парсинг ответа API релиза: версия и размер ассета
+    try:
+        _saved_hg = latest_release_info.__globals__['_http_get']
+        latest_release_info.__globals__['_http_get'] = (
+            lambda url, timeout=8: json.dumps({
+                "tag_name": "v9.9.9",
+                "assets": [{"name": "WurmChatTranslator.exe", "size": 12345},
+                           {"name": "readme.txt", "size": 1}]}))
+        good = (latest_release_info() == ((9, 9, 9), 12345)
+                and check_latest_release() == (9, 9, 9))
+        latest_release_info.__globals__['_http_get'] = _saved_hg
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] автообновление: разбор ответа "
+              f"API — версия и размер ассета")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] автообновление: разбор API: {exc}")
     # i18n: у всех языков полный набор ключей, названия — на родных языках
     try:
         ref = set(I18N["ru"])

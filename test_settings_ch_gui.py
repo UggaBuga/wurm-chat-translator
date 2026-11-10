@@ -160,11 +160,20 @@ def interact_grid():
     win.update()
     cbs = [w for w in walk(win)
            if isinstance(w, ttk.Checkbutton)
-           and str(w.cget("text")).startswith(("♪ ", "✉ "))]
+           and str(w.cget("text")).startswith(("🌐 ", "♪ ", "✉ "))]
+    tr = [w for w in cbs if str(w.cget("text")).startswith("🌐 ")]
     snd = [w for w in cbs if str(w.cget("text")).startswith("♪ ")]
     ntf = [w for w in cbs if str(w.cget("text")).startswith("✉ ")]
+    check("галочек «перевод» по числу каналов", len(tr) == len(m.CHANNELS))
     check("галочек «звук» по числу каналов", len(snd) == len(m.CHANNELS))
     check("галочек «уведомления» по числу каналов", len(ntf) == len(m.CHANNELS))
+    check("перевод по умолчанию включён в обычных каналах",
+          sum(1 for w in tr if w.instate(["selected"])) == len(tr) - 1)
+    # национальные чаты («Russian GL») по умолчанию БЕЗ перевода
+    gl_cell = cell_of(win, "Russian GL")
+    gl_cb = cb_in(gl_cell, "🌐 ")
+    check("у Russian GL перевод выключен по умолчанию",
+          gl_cb is not None and not gl_cb.instate(["selected"]))
     cap = [w for w in walk(win) if isinstance(w, ttk.Label)
            and w.cget("text") == m.tr("opt_channels")]
     check("заголовок секции каналов есть", len(cap) == 1)
@@ -205,6 +214,19 @@ def interact_grid():
           cfg_now().get("sound_channels") == ["Trade"])
     check("уведомления включены только у Event",
           cfg_now().get("notify_channels") == ["Event"])
+
+    # выключение перевода канала: галочка 🌐 = «переводить», снимаем у Event
+    cell = cell_of(win, "Event")
+    cb = cb_in(cell, "🌐 ")
+    check("галочка перевода в ячейке найдена", cb is not None)
+    if cb is not None:
+        check("перевод Event по умолчанию включён", bool(cb.instate(["selected"])))
+        cb.invoke()
+        win.update()
+        check("Event в списке без перевода",
+              "Event" in (cfg_now().get("no_translate_channels") or []))
+        check("другие каналы переводятся",
+              "Trade" not in (cfg_now().get("no_translate_channels") or []))
 
     b = find_button(win, m.tr("settings_close"))
     check("кнопка закрытия найдена", b is not None)

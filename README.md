@@ -46,6 +46,14 @@
 
 ## Что нового
 
+**[v1.7.7.7](../../releases/tag/v1.7.7.7)** — национальные чаты («Russian GL» и аналоги на других языках) по умолчанию больше не переводятся: они сразу попадают в список каналов без перевода, отдельная опция «переводить языковые чаты» убрана. В каналах без перевода между сообщениями больше нет пустой строки.
+
+**[v1.7.7.6](../../releases/tag/v1.7.7.6)** — у каждого канала появилась своя галочка перевода 🌐: включается и выключается в новой секции «Каналы: перевод, звук, уведомления» в настройках или правой кнопкой мыши по вкладке. Удобно, например, не переводить Event. Состояние запоминается между запусками.
+
+**[v1.7.7.5](../../releases/tag/v1.7.7.5)** — свой выборщик папок логов в «Клиентах»: показывает, сколько файлов логов лежит в папке, и подсвечивает папки, где логи есть. Кнопка «Добавить» тоже работает через него.
+
+**[v1.7.7.4](../../releases/tag/v1.7.7.4)** — в окне «Клиенты» путь к логам теперь можно редактировать: поля имени и пути, кнопки «Применить» и «Обзор…».
+
 **[v1.7.7.3](../../releases/tag/v1.7.7.3)** — обновление стало полностью автоматическим: кнопка «Проверить обновления» теперь всегда ведёт полный флоу скачивания и перезапуска (раньше при выключенной галочке автообновления отправляла на страницу релизов на GitHub); фоновая проверка при выключенной галочке молчит. Если скачивание не удалось — сообщение с предложением повторить, а не молчаливый переход на сайт.
 
 **[v1.7.7.2](../../releases/tag/v1.7.7.2)** — значки ♪/✉ на вкладках каналов стали пассивными индикаторами: случайный клик мимо вкладки больше не выключает звук или уведомления незаметно. Переключать — правой кнопкой мыши по вкладке или в новой секции «Звук и уведомления по каналам» в настройках. В «Прошлом» добавлена сноска, что перевод старых сообщений не мгновенный (около секунды на сообщение).
@@ -161,6 +169,14 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.7.7](../../releases/tag/v1.7.7.7)** — os chats nacionais («Russian GL» e equivalentes em outros idiomas) deixam de ser traduzidos por padrão: entram direto na lista de canais sem tradução, e a opção separada «traduzir chats de idiomas» foi removida. Nos canais sem tradução não há mais linha em branco entre as mensagens.
+
+**[v1.7.7.6](../../releases/tag/v1.7.7.6)** — cada canal ganhou sua própria opção de tradução 🌐: liga e desliga na nova seção «Canais: tradução, som, notificações» nas configurações ou com o botão direito na aba. Útil, por exemplo, para não traduzir o Event. O estado fica salvo entre sessões.
+
+**[v1.7.7.5](../../releases/tag/v1.7.7.5)** — seletor próprio de pasta de logs em «Клиенты»: mostra quantos arquivos de log existem na pasta e destaca as pastas onde há logs. O botão «Adicionar» também passa por ele.
+
+**[v1.7.7.4](../../releases/tag/v1.7.7.4)** — na janela «Клиенты» o caminho dos logs agora pode ser editado: campos de nome e caminho, botões «Применить» e «Обзор…».
 
 **[v1.7.7.3](../../releases/tag/v1.7.7.3)** — a atualização ficou totalmente automática: o botão «Verificar atualizações» agora sempre faz o fluxo completo de download e reinício (antes, com a opção de autoatualização desligada, mandava para a página de releases no GitHub); a verificação em segundo plano com a opção desligada fica em silêncio. Se o download falhar — mensagem para tentar de novo, em vez de ir ao site em silêncio.
 

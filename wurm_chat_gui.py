@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.7.3"
+APP_VERSION = "1.7.7.7"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -1980,9 +1980,9 @@ class TranslateWorker(threading.Thread):
         src_lang = None
         cur_amounts = []
         opts = self.options
-        # языковые каналы («Russian GL») — по умолчанию вообще без перевода
-        lang_channel = bool(RE_LANG_CHANNEL.match(channel or ""))
-        keep_as_is = lang_channel and not opts.get("translate_lang_channels", False)
+        # канал явно выключен из перевода (Настройки / ПКМ по вкладке);
+        # национальные чаты («Russian GL») лежат в этом списке по умолчанию
+        keep_as_is = channel in (opts.get("no_translate_channels") or [])
         use_currency = bool(opts.get("translate_currency", True))
         if self.enabled and body and not keep_as_is:
             trade_prefixed = channel == "Trade" and bool(RE_TRADE_PREFIX.match(body))
@@ -2053,7 +2053,9 @@ DEFAULTS = {
     "target_lang": "auto",   # auto → определить по языку клиента Steam
     "reply_src": "",         # "" → как основной язык перевода; иначе явный код
     "reply_dst": "en",       # панель ответа: на какой язык переводить
-    "translate_lang_channels": False,  # переводить языковые чаты («Russian GL»)
+    # национальные чаты («Russian GL») выключены из перевода по умолчанию
+    # (механизм тот же, что у других каналов; см. миграцию в load_config)
+    "no_translate_channels": [],  # каналы БЕЗ перевода (галочка 🌐)
     "translate_currency": True,        # «20s» → «20 серебра»; выкл — как есть
     "auto_copy_reply": True,           # перевод ответа — сразу в буфер обмена
     "sound_channels": [],   # каналы со звуком на новые сообщения (иконка 🔊)
@@ -2084,6 +2086,23 @@ def load_config():
             raw = {}
     cfg = dict(DEFAULTS)
     cfg.update({k: v for k, v in raw.items() if k in DEFAULTS})
+    # Миграция: общий флаг translate_lang_channels (до 1.7.7.6) уступил место
+    # поканальному выключению перевода. Был False или ключа нет — национальные
+    # чаты («Russian GL») выключены; был True — пользователь явно включал
+    # перевод, уважаем это. Решение фиксируем один раз: после первого
+    # сохранения новой версии старый ключ исчезает, новый — есть, и
+    # миграция больше не трогает список (пользователь может править сам).
+    if "no_translate_channels" not in raw or "translate_lang_channels" in raw:
+        lang_names = [n for n, _p, _pm in CHANNELS
+                      if RE_LANG_CHANNEL.match(n)]
+        off = list(cfg.get("no_translate_channels") or [])
+        if raw.get("translate_lang_channels") is True:
+            off = [c for c in off if c not in lang_names]
+        else:
+            for c in lang_names:
+                if c not in off:
+                    off.append(c)
+        cfg["no_translate_channels"] = off
     # миграция с версий < 1.5.0: единый путь logs_dir -> список клиентов
     if not cfg["clients"] and raw.get("logs_dir"):
         path = raw["logs_dir"]
@@ -2198,12 +2217,24 @@ I18N = {
         "settings_hint": "Изменения применяются сразу, перезапуск не нужен.",
         "settings_close": "Закрыть",
         "clients_none": "не заданы",
+        "clients_edit_hint": "Выберите клиента в списке — имя и путь "
+                               "можно править ниже.",
+        "btn_apply": "Применить",
+        "btn_browse": "Обзор…",
+        "pick_title": "Выбор папки логов",
+        "pick_up": "Вверх",
+        "pick_choose": "Выбрать эту папку",
+        "pick_status_ok": "Файлов логов: {n} ({files})",
+        "pick_status_none": "Файлов логов нет — это не папка logs игры",
+        "pick_status_bad": "Папку прочитать нельзя",
+        "pick_sel_preview": "В «{name}»",
         "lang_label": "Язык:",
         "chk_translate": "Перевод на {lang}",
         "chk_sound": "Звук",
         "chk_notify": "Уведомления",
         "chk_original": "Оригинал",
         "chk_on_top": "Поверх окон",
+        "tab_menu_translate": "Переводить этот канал",
         "tab_menu_sound": "Звук из этого канала",
         "tab_menu_notify": "Уведомления из этого канала",
         "tab_tt_sound_on": "Звук на новые сообщения: вкл (переключить — правая кнопка)",
@@ -2310,7 +2341,8 @@ I18N = {
         "glossary_save_err": "Ошибка сохранения: {exc}",
         "err_output": "Ошибка вывода: {exc}",
         "opt_sound": "Звук уведомлений:",
-        "opt_channels": "Звук и уведомления по каналам:",
+        "opt_channels": "Каналы: перевод, звук, уведомления:",
+        "opt_ch_translate": "перевод",
         "opt_ch_sound": "звук",
         "opt_ch_notify": "уведомления",
         "opt_channels_hint": "То же самое даёт правая кнопка мыши по вкладке канала.",
@@ -2372,12 +2404,24 @@ I18N = {
         "settings_hint": "Changes apply immediately, no restart needed.",
         "settings_close": "Close",
         "clients_none": "not set",
+        "clients_edit_hint": "Select a client in the list — name and "
+                               "path can be edited below.",
+        "btn_apply": "Apply",
+        "btn_browse": "Browse…",
+        "pick_title": "Choose the logs folder",
+        "pick_up": "Up",
+        "pick_choose": "Select this folder",
+        "pick_status_ok": "Log files: {n} ({files})",
+        "pick_status_none": "No log files — this is not the game's logs folder",
+        "pick_status_bad": "This folder cannot be read",
+        "pick_sel_preview": "In \"{name}\"",
         "lang_label": "Language:",
         "chk_translate": "Translate to {lang}",
         "chk_sound": "Sound",
         "chk_notify": "Notifications",
         "chk_original": "Original",
         "chk_on_top": "Always on top",
+        "tab_menu_translate": "Translate this channel",
         "tab_menu_sound": "Sound from this channel",
         "tab_menu_notify": "Notifications from this channel",
         "tab_tt_sound_on": "Sound on new messages: on (right-click to toggle)",
@@ -2485,7 +2529,8 @@ I18N = {
         "glossary_save_err": "Save error: {exc}",
         "err_output": "Output error: {exc}",
         "opt_sound": "Notification sound:",
-        "opt_channels": "Sound and notifications per channel:",
+        "opt_channels": "Channels: translation, sound, notifications:",
+        "opt_ch_translate": "translate",
         "opt_ch_sound": "sound",
         "opt_ch_notify": "notifications",
         "opt_channels_hint": "Right-clicking a channel tab does the same.",
@@ -2547,12 +2592,24 @@ I18N = {
         "settings_hint": "As alterações são aplicadas imediatamente, sem reiniciar.",
         "settings_close": "Fechar",
         "clients_none": "não definidos",
+        "clients_edit_hint": "Selecione um cliente na lista — nome e "
+                               "pasta podem ser editados abaixo.",
+        "btn_apply": "Aplicar",
+        "btn_browse": "Procurar…",
+        "pick_title": "Escolher a pasta de logs",
+        "pick_up": "Subir",
+        "pick_choose": "Selecionar esta pasta",
+        "pick_status_ok": "Arquivos de log: {n} ({files})",
+        "pick_status_none": "Sem arquivos de log — esta não é a pasta de logs do jogo",
+        "pick_status_bad": "Não foi possível ler a pasta",
+        "pick_sel_preview": "Em «{name}»",
         "lang_label": "Idioma:",
         "chk_translate": "Traduzir para {lang}",
         "chk_sound": "Som",
         "chk_notify": "Notificações",
         "chk_original": "Original",
         "chk_on_top": "Sempre visível",
+        "tab_menu_translate": "Traduzir este canal",
         "tab_menu_sound": "Som deste canal",
         "tab_menu_notify": "Notificações deste canal",
         "tab_tt_sound_on": "Som em novas mensagens: ativado (botão direito para alternar)",
@@ -2662,7 +2719,8 @@ I18N = {
         "glossary_save_err": "Erro ao salvar: {exc}",
         "err_output": "Erro de saída: {exc}",
         "opt_sound": "Som de notificação:",
-        "opt_channels": "Som e notificações por canal:",
+        "opt_channels": "Canais: tradução, som, notificações:",
+        "opt_ch_translate": "traduzir",
         "opt_ch_sound": "som",
         "opt_ch_notify": "notificações",
         "opt_channels_hint": "O botão direito sobre a aba do canal faz o mesmo.",
@@ -2725,12 +2783,25 @@ I18N = {
         "settings_hint": "Änderungen werden sofort übernommen, Neustart nicht erforderlich.",
         "settings_close": "Schließen",
         "clients_none": "nicht gesetzt",
+        "clients_edit_hint": "Wählen Sie einen Client in der Liste — "
+                               "Name und Ordner können unten bearbeitet "
+                               "werden.",
+        "btn_apply": "Übernehmen",
+        "btn_browse": "Durchsuchen…",
+        "pick_title": "Log-Ordner wählen",
+        "pick_up": "Nach oben",
+        "pick_choose": "Diesen Ordner wählen",
+        "pick_status_ok": "Log-Dateien: {n} ({files})",
+        "pick_status_none": "Keine Log-Dateien — das ist nicht der Log-Ordner des Spiels",
+        "pick_status_bad": "Ordner kann nicht gelesen werden",
+        "pick_sel_preview": "In „{name}“",
         "lang_label": "Sprache:",
         "chk_translate": "Übersetzen auf {lang}",
         "chk_sound": "Ton",
         "chk_notify": "Benachrichtigungen",
         "chk_original": "Original",
         "chk_on_top": "Immer im Vordergrund",
+        "tab_menu_translate": "Diesen Kanal übersetzen",
         "tab_menu_sound": "Ton aus diesem Kanal",
         "tab_menu_notify": "Benachrichtigungen aus diesem Kanal",
         "tab_tt_sound_on": "Ton bei neuen Nachrichten: an (Rechtsklick zum Umschalten)",
@@ -2843,7 +2914,8 @@ I18N = {
         "glossary_save_err": "Speicherfehler: {exc}",
         "err_output": "Ausgabefehler: {exc}",
         "opt_sound": "Benachrichtigungston:",
-        "opt_channels": "Ton und Benachrichtigungen pro Kanal:",
+        "opt_channels": "Kanäle: Übersetzung, Ton, Benachrichtigungen:",
+        "opt_ch_translate": "übersetzen",
         "opt_ch_sound": "Ton",
         "opt_ch_notify": "Benachrichtigungen",
         "opt_channels_hint": "Ein Rechtsklick auf den Kanalreiter tut dasselbe.",
@@ -2906,12 +2978,25 @@ I18N = {
         "settings_hint": "Los cambios se aplican inmediatamente, sin reiniciar.",
         "settings_close": "Cerrar",
         "clients_none": "sin definir",
+        "clients_edit_hint": "Seleccione un cliente en la lista — el "
+                               "nombre y la carpeta se pueden editar "
+                               "abajo.",
+        "btn_apply": "Aplicar",
+        "btn_browse": "Examinar…",
+        "pick_title": "Elegir la carpeta de logs",
+        "pick_up": "Subir",
+        "pick_choose": "Elegir esta carpeta",
+        "pick_status_ok": "Archivos de registro: {n} ({files})",
+        "pick_status_none": "Sin archivos de registro: esta no es la carpeta de logs del juego",
+        "pick_status_bad": "No se puede leer la carpeta",
+        "pick_sel_preview": "En «{name}»",
         "lang_label": "Idioma:",
         "chk_translate": "Traducir a {lang}",
         "chk_sound": "Sonido",
         "chk_notify": "Notificaciones",
         "chk_original": "Original",
         "chk_on_top": "Siempre visible",
+        "tab_menu_translate": "Traducir este canal",
         "tab_menu_sound": "Sonido de este canal",
         "tab_menu_notify": "Notificaciones de este canal",
         "tab_tt_sound_on": "Sonido en mensajes nuevos: activado (clic derecho para cambiar)",
@@ -3022,7 +3107,8 @@ I18N = {
         "glossary_save_err": "Error al guardar: {exc}",
         "err_output": "Error de salida: {exc}",
         "opt_sound": "Sonido de notificación:",
-        "opt_channels": "Sonido y notificaciones por canal:",
+        "opt_channels": "Canales: traducción, sonido, notificaciones:",
+        "opt_ch_translate": "traducir",
         "opt_ch_sound": "sonido",
         "opt_ch_notify": "notificaciones",
         "opt_channels_hint": "El clic derecho en la pestaña del canal hace lo mismo.",
@@ -3085,12 +3171,25 @@ I18N = {
         "settings_hint": "Les changements s'appliquent immédiatement, sans redémarrage.",
         "settings_close": "Fermer",
         "clients_none": "non définis",
+        "clients_edit_hint": "Sélectionnez un client dans la liste — "
+                               "le nom et le dossier sont modifiables "
+                               "ci-dessous.",
+        "btn_apply": "Appliquer",
+        "btn_browse": "Parcourir…",
+        "pick_title": "Choisir le dossier de logs",
+        "pick_up": "Monter",
+        "pick_choose": "Choisir ce dossier",
+        "pick_status_ok": "Fichiers de journal : {n} ({files})",
+        "pick_status_none": "Aucun fichier de journal — ce n'est pas le dossier de logs du jeu",
+        "pick_status_bad": "Impossible de lire le dossier",
+        "pick_sel_preview": "Dans « {name} »",
         "lang_label": "Langue :",
         "chk_translate": "Traduire en {lang}",
         "chk_sound": "Son",
         "chk_notify": "Notifications",
         "chk_original": "Original",
         "chk_on_top": "Toujours au premier plan",
+        "tab_menu_translate": "Traduire ce canal",
         "tab_menu_sound": "Son de ce canal",
         "tab_menu_notify": "Notifications de ce canal",
         "tab_tt_sound_on": "Son pour nouveaux messages : activé (clic droit pour changer)",
@@ -3203,7 +3302,8 @@ I18N = {
         "glossary_save_err": "Erreur d'enregistrement : {exc}",
         "err_output": "Erreur de sortie : {exc}",
         "opt_sound": "Son de notification :",
-        "opt_channels": "Son et notifications par canal :",
+        "opt_channels": "Canaux : traduction, son, notifications :",
+        "opt_ch_translate": "traduire",
         "opt_ch_sound": "son",
         "opt_ch_notify": "notifications",
         "opt_channels_hint": "Un clic droit sur l'onglet du canal fait la même chose.",
@@ -3262,12 +3362,23 @@ I18N = {
         "settings_hint": "更改立即生效，无需重启。",
         "settings_close": "关闭",
         "clients_none": "未设置",
+        "clients_edit_hint": "在列表中选择客户端——可在下方编辑名称和路径。",
+        "btn_apply": "应用",
+        "btn_browse": "浏览…",
+        "pick_title": "选择日志文件夹",
+        "pick_up": "向上",
+        "pick_choose": "选择此文件夹",
+        "pick_status_ok": "日志文件：{n} 个（{files}）",
+        "pick_status_none": "没有日志文件——这不是游戏的 logs 文件夹",
+        "pick_status_bad": "无法读取该文件夹",
+        "pick_sel_preview": "在「{name}」中",
         "lang_label": "语言：",
         "chk_translate": "翻译为{lang}",
         "chk_sound": "声音",
         "chk_notify": "通知",
         "chk_original": "原文",
         "chk_on_top": "置顶",
+        "tab_menu_translate": "翻译此频道",
         "tab_menu_sound": "此频道的声音",
         "tab_menu_notify": "此频道的通知",
         "tab_tt_sound_on": "新消息声音：开（右键切换）",
@@ -3367,7 +3478,8 @@ I18N = {
         "glossary_save_err": "保存错误：{exc}",
         "err_output": "输出错误：{exc}",
         "opt_sound": "通知声音：",
-        "opt_channels": "各频道的声音和通知：",
+        "opt_channels": "各频道：翻译、声音、通知：",
+        "opt_ch_translate": "翻译",
         "opt_ch_sound": "声音",
         "opt_ch_notify": "通知",
         "opt_channels_hint": "右键点击频道标签页可实现相同操作。",
@@ -3439,7 +3551,7 @@ def make_tray_icon():
 
 def run_gui():
     import tkinter as tk
-    from tkinter import filedialog, scrolledtext, ttk
+    from tkinter import scrolledtext, ttk
 
     cfg = load_config()
     target_lang = resolve_target_lang(cfg.get("target_lang"))
@@ -3929,9 +4041,12 @@ def run_gui():
         return resolve_sound_path(sid, cfg.get("sound_file") or "")
 
     def channel_tab_menu(event, client_idx, channel):
-        """ПКМ по вкладке канала: разрешить/запретить звук и уведомления
+        """ПКМ по вкладке канала: переводить ли канал, звук и уведомления
         именно из этого канала."""
         menu = tk.Menu(root, tearoff=0)
+        # галочка = «переводить», в конфиге храним список каналов БЕЗ перевода
+        var_t = tk.BooleanVar(
+            value=not channel_flag(cfg.get("no_translate_channels"), channel))
         var_s = tk.BooleanVar(
             value=channel_flag(cfg.get("sound_channels"), channel))
         var_n = tk.BooleanVar(
@@ -3942,6 +4057,14 @@ def run_gui():
             save_config(cfg)
             refresh_tab_marks()
 
+        def apply_translate():
+            set_channel_flag(cfg, "no_translate_channels", channel,
+                             not bool(var_t.get()))
+            save_config(cfg)
+            refresh_tab_marks()
+
+        menu.add_checkbutton(label=tr("tab_menu_translate"), variable=var_t,
+                             command=apply_translate)
         menu.add_checkbutton(label=tr("tab_menu_sound"), variable=var_s,
                              command=lambda: apply("sound_channels", var_s))
         menu.add_checkbutton(label=tr("tab_menu_notify"), variable=var_n,
@@ -4211,7 +4334,6 @@ def run_gui():
             "translate": tr_var.get(),
             "show_original": orig_var.get(),
             "on_top": top_var.get(),
-            "translate_lang_channels": bool(cfg.get("translate_lang_channels")),
             "translate_currency": bool(cfg.get("translate_currency", True)),
             "auto_copy_reply": bool(cfg.get("auto_copy_reply", True)),
         })
@@ -4977,7 +5099,6 @@ def run_gui():
         box = ttk.Frame(win, padding=12)
         box.pack(fill="both", expand=True)
 
-        lang_var = tk.BooleanVar(value=bool(cfg.get("translate_lang_channels")))
         cur_var = tk.BooleanVar(value=bool(cfg.get("translate_currency", True)))
         copy_var = tk.BooleanVar(value=bool(cfg.get("auto_copy_reply", True)))
         upd_var = tk.BooleanVar(value=bool(cfg.get("auto_update")))
@@ -4989,7 +5110,6 @@ def run_gui():
         snd_var = tk.StringVar(value=snd_names[snd_ids.index(cur_snd)])
 
         def apply(*_args):
-            cfg["translate_lang_channels"] = bool(lang_var.get())
             cfg["translate_currency"] = bool(cur_var.get())
             cfg["auto_copy_reply"] = bool(copy_var.get())
             cfg["auto_update"] = bool(upd_var.get())
@@ -5005,9 +5125,6 @@ def run_gui():
             play_sound(resolve_sound_path(cfg.get("sound") or "beep",
                                           cfg.get("sound_file") or ""))
 
-        ttk.Checkbutton(box, text=tr("opt_lang_channels"),
-                        variable=lang_var, command=apply).pack(anchor="w",
-                                                               pady=2)
         ttk.Checkbutton(box, text=tr("opt_currency"),
                         variable=cur_var, command=apply).pack(anchor="w",
                                                               pady=2)
@@ -5038,8 +5155,9 @@ def run_gui():
         ch_grid = ttk.Frame(box)
         ch_grid.pack(anchor="w")
 
-        def apply_ch_flag(key, channel, var):
-            set_channel_flag(cfg, key, channel, bool(var.get()))
+        def apply_ch_flag(key, channel, var, invert=False):
+            val = bool(var.get())
+            set_channel_flag(cfg, key, channel, (not val) if invert else val)
             save_config(cfg)
             refresh_tab_marks()
 
@@ -5049,10 +5167,20 @@ def run_gui():
                       sticky="n")
             ttk.Label(cell, text=channel, font=("Segoe UI", 8, "bold")
                       ).pack(anchor="w")
+            # перевод: галочка = «переводить», в конфиге храним наоборот —
+            # список каналов БЕЗ перевода (по умолчанию пуст = все переводятся)
+            vt = tk.BooleanVar(
+                value=not channel_flag(cfg.get("no_translate_channels"),
+                                       channel))
             vs = tk.BooleanVar(
                 value=channel_flag(cfg.get("sound_channels"), channel))
             vn = tk.BooleanVar(
                 value=channel_flag(cfg.get("notify_channels"), channel))
+            ttk.Checkbutton(cell, text="🌐 " + tr("opt_ch_translate"),
+                            variable=vt,
+                            command=lambda ch=channel, v=vt: apply_ch_flag(
+                                "no_translate_channels", ch, v, invert=True)
+                            ).pack(anchor="w")
             ttk.Checkbutton(cell, text="♪ " + tr("opt_ch_sound"), variable=vs,
                             command=lambda k="sound_channels", ch=channel,
                             v=vs: apply_ch_flag(k, ch, v)
@@ -5088,7 +5216,7 @@ def run_gui():
         import tkinter.messagebox as mb
         win = tk.Toplevel(root)
         win.title(tr("dlg_clients_title"))
-        win.geometry("640x340")
+        win.geometry("640x410")
         win.transient(root)
         win.minsize(480, 260)
 
@@ -5098,7 +5226,174 @@ def run_gui():
         tree.heading("path", text=tr("col_path"))
         tree.column("name", width=150, anchor="w")
         tree.column("path", width=440, anchor="w")
-        tree.pack(fill="both", expand=True, padx=8, pady=8)
+        tree.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+
+        # панель правки выбранной строки: имя и путь редактируются здесь
+        # (двойной щелчок по строке тоже подгружает её в поля)
+        edit = ttk.Frame(win)
+        edit.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(edit, text=tr("col_name")).grid(row=0, column=0, sticky="w")
+        ttk.Label(edit, text=tr("col_path")).grid(row=1, column=0, sticky="w",
+                                                 pady=(4, 0))
+        name_var = tk.StringVar()
+        path_var = tk.StringVar()
+        ttk.Entry(edit, textvariable=name_var).grid(
+            row=0, column=1, sticky="we", padx=(6, 0))
+        path_entry = ttk.Entry(edit, textvariable=path_var)
+        path_entry.grid(row=1, column=1, sticky="we", padx=(6, 0), pady=(4, 0))
+        ttk.Button(edit, text=tr("btn_browse"),
+                   command=lambda: pick_dir()).grid(row=1, column=2,
+                                                    padx=(6, 0), pady=(4, 0))
+        ttk.Button(edit, text=tr("btn_apply"),
+                   command=lambda: apply_row()).grid(row=1, column=3,
+                                                     padx=(6, 0), pady=(4, 0))
+        edit.columnconfigure(1, weight=1)
+        ttk.Label(edit, text=tr("clients_edit_hint"),
+                  foreground="#777777", wraplength=560).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        def selected_iid():
+            sel = tree.selection()
+            return sel[0] if sel else None
+
+        def load_selected(_event=None):
+            iid = selected_iid()
+            if iid:
+                n, p = row_values(iid)
+                name_var.set(n)
+                path_var.set(p)
+
+        def logs_in_folder(path):
+            """Имена файлов логов Wurm в папке (<канал>.<ГГГГ-ММ>.txt)
+            или None, если папку прочитать нельзя."""
+            try:
+                return sorted(n for n in os.listdir(path)
+                              if re.search(r"\.\d{4}-\d{2}\.txt$", n))
+            except OSError:
+                return None
+
+        def logs_status(path):
+            """Строка-оценка папки для выборщика: сколько логов внутри."""
+            names = logs_in_folder(path)
+            if names is None:
+                return tr("pick_status_bad"), "#cc0000"
+            if not names:
+                return tr("pick_status_none"), "#777777"
+            shown = ", ".join(names[:3]) \
+                + (", …" if len(names) > 3 else "")
+            return tr("pick_status_ok", n=len(names), files=shown), "#1a7a1a"
+
+        def browse_logs_dir(initial=""):
+            """Свой выбор папки вместо родного диалога Windows: тот внутри
+            папки логов рисует пустой список с туманным «нет элементов…».
+            Здесь рядом видно, есть ли в папке файлы логов. Возвращает
+            путь или None."""
+            result = {}
+            dlg = tk.Toplevel(win)
+            dlg.title(tr("pick_title"))
+            dlg.transient(win)
+            dlg.resizable(False, False)
+            box = ttk.Frame(dlg, padding=10)
+            box.pack(fill="both", expand=True)
+            bar = ttk.Frame(box)
+            bar.pack(fill="x")
+            cur_var = tk.StringVar()
+            ttk.Entry(bar, textvariable=cur_var, width=52).pack(side="left")
+            ttk.Button(bar, text=tr("pick_up"),
+                       command=lambda: navigate(up=True)).pack(side="left",
+                                                               padx=(6, 0))
+            lst = tk.Listbox(box, width=64, height=14,
+                             font=("Segoe UI", 9))
+            lst.pack(fill="both", expand=True, pady=(8, 4))
+            cur_status = ttk.Label(box, wraplength=430, justify="left")
+            cur_status.pack(anchor="w")
+            sel_status = ttk.Label(box, wraplength=430, justify="left")
+            sel_status.pack(anchor="w", pady=(2, 0))
+            row = ttk.Frame(box)
+            row.pack(fill="x", pady=(8, 0))
+            ttk.Button(row, text=tr("pick_choose"),
+                       command=lambda: choose()).pack(side="right")
+            ttk.Button(row, text=tr("dig_cancel"),
+                       command=dlg.destroy).pack(side="right", padx=(0, 8))
+
+            def show_status(label, path):
+                text, color = logs_status(path)
+                label.config(text=text, foreground=color)
+
+            def navigate(path=None, up=False):
+                p = cur_var.get().strip() if path is None else path
+                if up:
+                    p = os.path.dirname(p)
+                if not os.path.isdir(p):
+                    return
+                cur_var.set(p)
+                lst.delete(0, "end")
+                try:
+                    subs = sorted((n for n in os.listdir(p)
+                                   if os.path.isdir(os.path.join(p, n))),
+                                  key=str.casefold)
+                except OSError:
+                    subs = []
+                for n in subs:
+                    full = os.path.join(p, n)
+                    mark = " ✓" if logs_in_folder(full) else ""
+                    lst.insert("end", n + mark)
+                show_status(cur_status, p)
+                sel_status.config(text="", foreground="#777777")
+
+            def on_select(_e=None):
+                sel = lst.curselection()
+                if not sel:
+                    return
+                name = lst.get(sel[0]).removesuffix(" ✓")
+                full = os.path.join(cur_var.get().strip(), name)
+                text, color = logs_status(full)
+                sel_status.config(text=tr("pick_sel_preview", name=name)
+                                  + " — " + text, foreground=color)
+
+            def on_double(_e=None):
+                sel = lst.curselection()
+                if not sel:
+                    return
+                name = lst.get(sel[0]).removesuffix(" ✓")
+                navigate(os.path.join(cur_var.get().strip(), name))
+
+            def choose():
+                p = cur_var.get().strip()
+                if os.path.isdir(p):
+                    result["path"] = p
+                    dlg.destroy()
+
+            def on_enter(_e=None):
+                navigate(cur_var.get().strip())
+
+            lst.bind("<<ListboxSelect>>", on_select)
+            lst.bind("<Double-1>", on_double)
+            entry = bar.winfo_children()[0]
+            entry.bind("<Return>", on_enter)
+            start = initial if os.path.isdir(initial) \
+                else os.path.expanduser("~")
+            navigate(start)
+            dlg.update_idletasks()
+            dlg.grab_set()
+            win.wait_window(dlg)
+            return result.get("path")
+
+        def pick_dir():
+            d = browse_logs_dir(path_var.get().strip())
+            if d:
+                path_var.set(d)
+
+        def apply_row(_event=None):
+            iid = selected_iid()
+            if not iid:
+                return
+            tree.item(iid, values=(name_var.get().strip(),
+                                   path_var.get().strip()))
+
+        tree.bind("<<TreeviewSelect>>", load_selected)
+        tree.bind("<Double-1>", load_selected)
+        path_entry.bind("<Return>", apply_row)
 
         btns = ttk.Frame(win)
         btns.pack(fill="x", padx=8, pady=(0, 8))
@@ -5139,7 +5434,7 @@ def run_gui():
                 mb.showinfo(tr("app_title"), tr("find_all_present"))
 
         def add_manual():
-            d = filedialog.askdirectory(parent=win, title=tr("add_dir_title"))
+            d = browse_logs_dir("")
             if not d:
                 return
             name = os.path.basename(os.path.dirname(d)) or \
@@ -5684,6 +5979,7 @@ def run_gui():
 # --------------------------------------------------------------------------- #
 
 def self_test():
+    global CONFIG_FILE
     ok = True
     # консоль exe может быть в однобайтовой кодировке (cp1251) — не падаем
     # на не-ASCII символах в выводе самотеста
@@ -6032,6 +6328,48 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] валюта: {exc}")
+    # выключенный перевод канала: worker отдаёт оригинал как есть, без
+    # обращения к сети (так рендерится без пустой строки-разделителя)
+    try:
+        w = TranslateWorker(queue.Queue(), queue.Queue(),
+                            threading.Event(), enabled=True, target_lang="ru",
+                            options={"no_translate_channels": ["Event"]})
+        w.raw.put(("line", 0, "Event", "[12:00:00] <Kimi> guards!"))
+        w._process_one()
+        item = w.done.get(timeout=1)
+        # ("done", клиент, канал, время, имя, оригинал, перевод, src_lang)
+        good = (item[0] == "done" and item[5] == "guards!"
+                and item[6] == "guards!" and item[7] is None)
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] канал без перевода: "
+              "оригинал проходит как есть")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] канал без перевода: {exc}")
+    # миграция: национальные чаты в no_translate_channels по умолчанию;
+    # старый флаг translate_lang_channels=True уважаем как явное «вкл»
+    try:
+        _cfg_bak = CONFIG_FILE
+        cases = [(None, True), (False, True), (True, False)]
+        good = True
+        for old_flag, expect_gl in cases:
+            p = os.path.join(tempfile.mkdtemp(), "cfg.json")
+            data = {"clients": []}
+            if old_flag is not None:
+                data["translate_lang_channels"] = old_flag
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            CONFIG_FILE = p
+            c = load_config()
+            has = "Russian GL" in (c.get("no_translate_channels") or [])
+            good = good and (has == expect_gl)
+        CONFIG_FILE = _cfg_bak
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] миграция языковых чатов: "
+              "по умолчанию выкл; старый флаг вкл — уважаем")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] миграция языковых чатов: {exc}")
     # встроенные звуки: файлы на месте, все id резолвятся; свой файл важнее
     try:
         good = sounds_dir() is not None

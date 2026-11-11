@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.7.8"
+APP_VERSION = "1.7.7.9"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -270,9 +270,11 @@ def _ps_quote(path):
 def build_update_script(exe, tmp, pid):
     """Скрипт помощника: дождаться выхода старой копии, проверить скачанный
     файл (существует, начинается с MZ), подменить exe, запустить новую.
-    Первые 90 секунд наблюдаем за новым процессом: молчаливый падеж или
-    диалог загрузчика «Error» (битый exe/антивирур съел DLL) — вернуть
-    старую копию. Процесс к моменту старта может быть уже завершён —
+    Первый запуск после обновления иногда падает: антивирус съедает DLL
+    при распаковке (диалог загрузчика «Error») — но повторный запуск
+    проходит. Поэтому при неудаче перезапускаем новый exe до 3 раз,
+    старую версию возвращаем только если все попытки провалились.
+    Процесс к моменту старта может быть уже завершён —
     Get-Process/Wait-Process терпят это."""
     bak = exe + ".bak"
     return f"""$ErrorActionPreference = 'Stop'
@@ -301,20 +303,25 @@ try {{
   }}
   if (-not $moved) {{ throw 'cannot replace exe' }}
   Move-Item -LiteralPath '{_ps_quote(tmp)}' -Destination '{_ps_quote(exe)}' -Force
-  $proc = Start-Process '{_ps_quote(exe)}' -PassThru
-  $restored = $false
-  for ($i = 0; $i -lt 45; $i++) {{
-    Start-Sleep -Seconds 2
-    try {{ $proc.Refresh() }} catch {{}}
-    if ($proc.HasExited) {{ $restored = $true; break }}
-    if ($proc.MainWindowTitle -eq 'Error') {{
-      try {{ $proc.Kill() }} catch {{}}
-      $restored = $true
-      break
+  $ok = $false
+  for ($attempt = 0; $attempt -lt 3 -and -not $ok; $attempt++) {{
+    $proc = Start-Process '{_ps_quote(exe)}' -PassThru
+    $died = $false
+    for ($i = 0; $i -lt 45; $i++) {{
+      Start-Sleep -Seconds 2
+      try {{ $proc.Refresh() }} catch {{}}
+      if ($proc.HasExited) {{ $died = $true; break }}
+      if ($proc.MainWindowTitle -eq 'Error') {{
+        try {{ $proc.Kill() }} catch {{}}
+        Start-Sleep -Seconds 3
+        $died = $true
+        break
+      }}
+      if ($proc.MainWindowTitle -like '*Wurm*') {{ $ok = $true; break }}
     }}
-    if ($proc.MainWindowTitle -like '*Wurm*') {{ break }}
+    if (-not $died -and -not $ok) {{ $ok = $true }}
   }}
-  if ($restored) {{
+  if (-not $ok) {{
     Start-Sleep -Milliseconds 500
     Move-Item -LiteralPath '{_ps_quote(bak)}' -Destination '{_ps_quote(exe)}' -Force
   }} else {{
@@ -6494,6 +6501,8 @@ def self_test():
                 and "Start-Process 'C:\\My Apps\\WCT.exe' -PassThru" in s
                 and "$proc.HasExited" in s
                 and "MainWindowTitle -eq 'Error'" in s
+                and "$attempt -lt 3" in s
+                and "if (-not $ok)" in s
                 and "catch" in s)
         ok &= good
         print(f"  [{'OK ' if good else 'FAIL'}] автообновление: скрипт "

@@ -51,7 +51,7 @@ except Exception:                     # pystray не обязателен — б
     HAVE_TRAY = False
 
 APP_TITLE = "Wurm Chat — переводчик"
-APP_VERSION = "1.7.7.9"
+APP_VERSION = "1.7.7.14"
 # В exe (PyInstaller) __file__ живёт во временной папке распаковки — пути к
 # конфигу и debug-логу берём рядом с исполняемым файлом.
 APP_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -267,16 +267,20 @@ def _ps_quote(path):
     return path.replace("'", "''")
 
 
-def build_update_script(exe, tmp, pid):
+def build_update_script(exe, tmp, pid, newer):
     """Скрипт помощника: дождаться выхода старой копии, проверить скачанный
     файл (существует, начинается с MZ), подменить exe, запустить новую.
     Первый запуск после обновления иногда падает: антивирус съедает DLL
     при распаковке (диалог загрузчика «Error») — но повторный запуск
     проходит. Поэтому при неудаче перезапускаем новый exe до 3 раз,
     старую версию возвращаем только если все попытки провалились.
+    Любой откат — НЕ молча: возвращаем старую копию, перезапускаем её
+    (пользователь не должен остаться с закрытым приложением) и кладём
+    маркер update_failed — приложение при старте объяснит, что случилось.
     Процесс к моменту старта может быть уже завершён —
     Get-Process/Wait-Process терпят это."""
     bak = exe + ".bak"
+    marker = exe + ".update_failed"
     return f"""$ErrorActionPreference = 'Stop'
 $old = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue
 if ($old) {{ try {{ Wait-Process -Id {int(pid)} -Timeout 90 }} catch {{}} }}
@@ -324,6 +328,7 @@ try {{
   if (-not $ok) {{
     Start-Sleep -Milliseconds 500
     Move-Item -LiteralPath '{_ps_quote(bak)}' -Destination '{_ps_quote(exe)}' -Force
+    throw 'updated exe failed to start'
   }} else {{
     Remove-Item -LiteralPath '{_ps_quote(bak)}' -Force -ErrorAction SilentlyContinue
   }}
@@ -332,16 +337,19 @@ try {{
     Move-Item -LiteralPath '{_ps_quote(bak)}' -Destination '{_ps_quote(exe)}' -Force -ErrorAction SilentlyContinue
   }}
   Remove-Item -LiteralPath '{_ps_quote(tmp)}' -Force -ErrorAction SilentlyContinue
+  # откат — не молча: маркер + перезапуск прежней версии
+  Set-Content -LiteralPath '{_ps_quote(marker)}' -Value '{_ps_quote(newer)}' -Encoding ASCII
+  try {{ Start-Process '{_ps_quote(exe)}' }} catch {{}}
 }}
 Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
 """
 
 
-def spawn_update_helper(exe, tmp):
+def spawn_update_helper(exe, tmp, newer):
     """Запустить отсоединённого помощника, который дождётся нашего выхода,
     заменит exe свежескачанным и стартанёт его. True — помощник запущен."""
     try:
-        script = build_update_script(exe, tmp, os.getpid())
+        script = build_update_script(exe, tmp, os.getpid(), newer)
         fd, ps1 = tempfile.mkstemp(prefix="wct_update_", suffix=".ps1")
         # BOM обязателен: Windows PowerShell 5.1 читает ps1 без BOM как ANSI
         # и портит кириллицу в путях (скрипт падает, замена не происходит)
@@ -559,7 +567,7 @@ GTX_BAN_SECONDS = 1800       # бан на 30 минут
 TRANSLATOR_STATE = {"backend": None}
 
 
-def translator_status_text():
+def translator_status_text(count=0, translate_on=True):
     """Человекочитаемый статус переводчика для статусной строки."""
     st = TRANSLATOR_STATE.get("backend")
     if st == "gtx":
@@ -568,6 +576,10 @@ def translator_status_text():
         return tr("backend_mymemory")
     if st == "fallback":
         return tr("backend_fallback")
+    if not translate_on:
+        return tr("backend_off")
+    if count == 0:
+        return tr("backend_waiting")
     return tr("backend_unknown")
 
 
@@ -2134,6 +2146,7 @@ DEFAULTS = {
     "notify_channels": [],  # каналы с уведомлениями на новые сообщения (🔔)
     "auto_update": True,    # автоустановка обновлений: спросить, скачать,
                             # заменить, перезапустить (вкл. по умолчанию)
+    "gap_lines": True,      # пустая строка-разделитель между сообщениями
     "alerts": [],                      # сигналы: channels/pattern/enabled/...
 }
 # Сигнал по умолчанию: фраза археологии «можно копать центр бывшего дида»
@@ -2316,7 +2329,7 @@ I18N = {
         "reply_label": "Ответ:",
         "ctx_reply": "Ответить",
         "btn_start": "▶ Старт",
-        "btn_stop": "■ Стоп",
+        "btn_stop": "■ Пауза",
         "btn_clear": "Очистить всё",
         "btn_search": "🔍 Найти",
         "btn_dig": "🕑 Прошлое",
@@ -2353,6 +2366,12 @@ I18N = {
         "backend_mymemory": "перевод: запасной сервис",
         "backend_fallback": "перевод: Google в перерыве, запасной сервис",
         "backend_unknown": "перевод: нет данных",
+        "backend_waiting": "переводчик готов, ждёт сообщений",
+        "backend_off": "перевод выключен галочкой",
+        "chat_empty_hint": "Слежу за логами… Напишите что-нибудь в канал «{ch}» в игре — перевод появится здесь.",
+        "reply_placeholder": "Ваш текст для ответа…",
+        "reply_result_placeholder": "перевод появится здесь (и скопируется в буфер)",
+        "reply_tt": "Напишите здесь ответ на своём языке — справа появится перевод (и скопируется в буфер, если включена опция).",
         "watcher_restarted": "Наблюдатель перезапущен после сбоя (см. debug-лог)",
         "worker_restarted": "Переводчик перезапущен после сбоя (см. debug-лог)",
         "msg_untranslated": "(не удалось перевести)",
@@ -2362,6 +2381,7 @@ I18N = {
         "tray_show": "Показать",
         "tray_quit": "Выход",
         "opt_auto_update": "Автоматически скачивать и устанавливать обновления",
+        "opt_gap": "Пустая строка-разделитель между сообщениями",
         "update_dl_title": "Обновление переводчика",
         "update_ask_title": "Доступна новая версия",
         "update_ask_msg": "Вышла версия {new} (у вас {cur}).\n"
@@ -2372,6 +2392,12 @@ I18N = {
                                "Проверьте подключение к сети.",
         "update_download_failed": "Не удалось скачать обновление. \n"
                                "Проверьте подключение к сети и повторите.",
+        "update_failed_notice":
+            "Обновление до версии {ver} не установилось — программа работает "
+            "в прежней версии, всё в порядке.\n"
+            "Если это повторится, возможно, мешает антивирус — тогда "
+            "добавьте папку с программой в его исключения.",
+        "update_failed_download": "Скачать вручную",
         "update_ask_no_remind": "Не напоминать об этом обновлении",
         "update_yes": "Да",
         "update_no": "Нет",
@@ -2423,7 +2449,7 @@ I18N = {
         "sound_default": "Как общий",
         "sound_channel_default": "Как у канала",
         "sound_off": "Выкл.",
-        "alerts_log_btn": "Журнал",
+        "alerts_log_btn": "Срабатывания",
         "alerts_log_title": "Журнал срабатываний сигналов",
         "alerts_log_empty": "Срабатываний пока не было.",
         "alerts_log_col_time": "Время",
@@ -2503,7 +2529,7 @@ I18N = {
         "reply_label": "Reply:",
         "ctx_reply": "Reply",
         "btn_start": "▶ Start",
-        "btn_stop": "■ Stop",
+        "btn_stop": "■ Pause",
         "btn_clear": "Clear all",
         "btn_search": "🔍 Find",
         "btn_dig": "🕑 Past",
@@ -2540,6 +2566,12 @@ I18N = {
         "backend_mymemory": "translation: fallback service",
         "backend_fallback": "translation: Google cooling down, fallback service",
         "backend_unknown": "translation: no data",
+        "backend_waiting": "translator ready, waiting for messages",
+        "backend_off": "translation is off (checkbox)",
+        "chat_empty_hint": "Watching the logs… Write something in the “{ch}” channel in the game — the translation will appear here.",
+        "reply_placeholder": "Your reply text…",
+        "reply_result_placeholder": "translation appears here (and is copied to the clipboard)",
+        "reply_tt": "Type your reply here in your language — the translation appears on the right (and is copied to the clipboard if the option is on).",
         "watcher_restarted": "Watcher restarted after a crash (see debug log)",
         "worker_restarted": "Translator restarted after a crash (see debug log)",
         "msg_untranslated": "(failed to translate)",
@@ -2549,6 +2581,7 @@ I18N = {
         "tray_show": "Show",
         "tray_quit": "Exit",
         "opt_auto_update": "Automatically download and install updates",
+        "opt_gap": "Blank separator line between messages",
         "update_dl_title": "Translator update",
         "update_ask_title": "Update available",
         "update_ask_msg": "Version {new} is available (you have {cur}).\n"
@@ -2559,6 +2592,12 @@ I18N = {
                                "Check your internet connection.",
         "update_download_failed": "Could not download the update. \n"
                                "Check your internet connection and try again.",
+        "update_failed_notice":
+            "The update to {ver} didn't install — the app is still running "
+            "the previous version, everything is fine.\n"
+            "If this keeps happening, your antivirus may be blocking it — "
+            "add the program's folder to its exclusions.",
+        "update_failed_download": "Download manually",
         "update_ask_no_remind": "Don't remind me about this update",
         "update_yes": "Yes",
         "update_no": "No",
@@ -2611,7 +2650,7 @@ I18N = {
         "sound_default": "Same as global",
         "sound_channel_default": "Channel default",
         "sound_off": "Off",
-        "alerts_log_btn": "Log",
+        "alerts_log_btn": "Alert history",
         "alerts_log_title": "Alert history",
         "alerts_log_empty": "No alerts yet.",
         "alerts_log_col_time": "Time",
@@ -2691,7 +2730,7 @@ I18N = {
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
-        "btn_stop": "■ Parar",
+        "btn_stop": "■ Pausar",
         "btn_clear": "Limpar tudo",
         "btn_search": "🔍 Buscar",
         "btn_dig": "🕑 Passado",
@@ -2729,6 +2768,12 @@ I18N = {
         "backend_mymemory": "tradução: serviço reserva",
         "backend_fallback": "tradução: Google em pausa, serviço reserva",
         "backend_unknown": "tradução: sem dados",
+        "backend_waiting": "tradutor pronto, aguardando mensagens",
+        "backend_off": "tradução desligada (caixa de seleção)",
+        "chat_empty_hint": "Acompanhando os logs… Escreva algo no canal “{ch}” no jogo — a tradução aparecerá aqui.",
+        "reply_placeholder": "Seu texto de resposta…",
+        "reply_result_placeholder": "a tradução aparece aqui (e é copiada para a área de transferência)",
+        "reply_tt": "Digite sua resposta aqui no seu idioma — a tradução aparece à direita (e é copiada se a opção estiver ativa).",
         "watcher_restarted": "Observador reiniciado após falha (veja o log)",
         "worker_restarted": "Tradutor reiniciado após falha (veja o log)",
         "msg_untranslated": "(falha ao traduzir)",
@@ -2738,6 +2783,7 @@ I18N = {
         "tray_show": "Mostrar",
         "tray_quit": "Sair",
         "opt_auto_update": "Baixar e instalar atualizações automaticamente",
+        "opt_gap": "Linha em branco separando as mensagens",
         "update_dl_title": "Atualização do tradutor",
         "update_ask_title": "Nova versão disponível",
         "update_ask_msg": "Versão {new} disponível (você tem {cur}).\n"
@@ -2748,6 +2794,12 @@ I18N = {
                                "Verifique a conexão.",
         "update_download_failed": "Não foi possível baixar a atualização. \n"
                                "Verifique a conexão e tente novamente.",
+        "update_failed_notice":
+            "A atualização para a versão {ver} não foi instalada — o "
+            "programa continua na versão anterior, está tudo bem.\n"
+            "Se isso se repetir, pode ser o antivírus — nesse caso, "
+            "adicione a pasta do programa às exclusões dele.",
+        "update_failed_download": "Baixar manualmente",
         "update_ask_no_remind": "Não lembrar desta atualização",
         "update_yes": "Sim",
         "update_no": "Não",
@@ -2801,7 +2853,7 @@ I18N = {
         "sound_default": "Como o geral",
         "sound_channel_default": "Som do canal",
         "sound_off": "Desligado",
-        "alerts_log_btn": "Registro",
+        "alerts_log_btn": "Disparos",
         "alerts_log_title": "Histórico de alertas",
         "alerts_log_empty": "Nenhum alerta ainda.",
         "alerts_log_col_time": "Hora",
@@ -2883,7 +2935,7 @@ I18N = {
         "reply_label": "Antwort:",
         "ctx_reply": "Antworten",
         "btn_start": "▶ Start",
-        "btn_stop": "■ Stopp",
+        "btn_stop": "■ Pause",
         "btn_clear": "Alles löschen",
         "btn_search": "🔍 Suchen",
         "btn_dig": "🕑 Vergangenheit",
@@ -2924,6 +2976,12 @@ I18N = {
         "backend_mymemory": "Übersetzung: Ersatzdienst",
         "backend_fallback": "Übersetzung: Google pausiert, Ersatzdienst",
         "backend_unknown": "Übersetzung: keine Daten",
+        "backend_waiting": "Übersetzer bereit, wartet auf Nachrichten",
+        "backend_off": "Übersetzung ausgeschaltet (Kontrollkästchen)",
+        "chat_empty_hint": "Beobachte die Logs… Schreibe etwas in den Kanal „{ch}“ im Spiel — die Übersetzung erscheint hier.",
+        "reply_placeholder": "Deine Antwort…",
+        "reply_result_placeholder": "Übersetzung erscheint hier (und wird in die Zwischenablage kopiert)",
+        "reply_tt": "Antwort hier in deiner Sprache eingeben — die Übersetzung erscheint rechts (und wird kopiert, wenn die Option aktiv ist).",
         "watcher_restarted": "Beobachter nach Absturz neu gestartet (s. Debug-Log)",
         "worker_restarted": "Übersetzer nach Absturz neu gestartet (s. Debug-Log)",
         "msg_untranslated": "(Übersetzung fehlgeschlagen)",
@@ -2933,6 +2991,7 @@ I18N = {
         "tray_show": "Anzeigen",
         "tray_quit": "Beenden",
         "opt_auto_update": "Updates automatisch herunterladen und installieren",
+        "opt_gap": "Leerzeile zwischen den Nachrichten",
         "update_dl_title": "Update des Übersetzers",
         "update_ask_title": "Neue Version verfügbar",
         "update_ask_msg": "Version {new} ist verfügbar (installiert: {cur}).\n"
@@ -2944,6 +3003,14 @@ I18N = {
         "update_download_failed": "Das Update konnte nicht heruntergeladen werden. \n"
                                "Verbindung prüfen und erneut versuchen.",
         "update_ask_no_remind": "Nicht mehr an dieses Update erinnern",
+        "update_failed_notice":
+            "Das Update auf Version {ver} wurde nicht installiert — das "
+            "Programm läuft weiterhin in der alten Version, alles ist in "
+            "Ordnung.\n"
+            "Wenn sich das wiederholt, blockiert eventuell Ihr "
+            "Antivirenprogramm — fügen Sie dann den Programmordner zu den "
+            "Ausnahmen hinzu.",
+        "update_failed_download": "Manuell herunterladen",
         "update_yes": "Ja",
         "update_no": "Nein",
         "update_downloading": "Version v{ver} wird heruntergeladen…\n"
@@ -2996,7 +3063,7 @@ I18N = {
         "sound_default": "Wie global",
         "sound_channel_default": "Kanal-Standard",
         "sound_off": "Aus",
-        "alerts_log_btn": "Protokoll",
+        "alerts_log_btn": "Auslösungen",
         "alerts_log_title": "Signalprotokoll",
         "alerts_log_empty": "Noch keine Signale.",
         "alerts_log_col_time": "Zeit",
@@ -3078,7 +3145,7 @@ I18N = {
         "reply_label": "Responder:",
         "ctx_reply": "Responder",
         "btn_start": "▶ Iniciar",
-        "btn_stop": "■ Detener",
+        "btn_stop": "■ Pausar",
         "btn_clear": "Borrar todo",
         "btn_search": "🔍 Buscar",
         "btn_dig": "🕑 Pasado",
@@ -3116,6 +3183,12 @@ I18N = {
         "backend_mymemory": "traducción: servicio de respaldo",
         "backend_fallback": "traducción: Google en pausa, servicio de respaldo",
         "backend_unknown": "traducción: sin datos",
+        "backend_waiting": "traductor listo, esperando mensajes",
+        "backend_off": "traducción desactivada (casilla)",
+        "chat_empty_hint": "Vigilando los registros… Escribe algo en el canal “{ch}” en el juego — la traducción aparecerá aquí.",
+        "reply_placeholder": "Tu respuesta…",
+        "reply_result_placeholder": "la traducción aparece aquí (y se copia al portapapeles)",
+        "reply_tt": "Escribe tu respuesta aquí en tu idioma — la traducción aparece a la derecha (y se copia si la opción está activa).",
         "watcher_restarted": "Observador reiniciado tras un fallo (ver log)",
         "worker_restarted": "Traductor reiniciado tras un fallo (ver log)",
         "msg_untranslated": "(no se pudo traducir)",
@@ -3126,6 +3199,7 @@ I18N = {
         "tray_quit": "Salir",
         "opt_auto_update": "Descargar e instalar actualizaciones "
                           "automáticamente",
+        "opt_gap": "Línea en blanco separando los mensajes",
         "update_dl_title": "Actualización del traductor",
         "update_ask_title": "Nueva versión disponible",
         "update_ask_msg": "Versión {new} disponible (tienes {cur}).\n"
@@ -3136,6 +3210,12 @@ I18N = {
                                "Comprueba la conexión.",
         "update_download_failed": "No se pudo descargar la actualización. \n"
                                "Comprueba la conexión y reintenta.",
+        "update_failed_notice":
+            "La actualización a la versión {ver} no se instaló — el programa "
+            "sigue en la versión anterior, no pasa nada.\n"
+            "Si se repite, puede ser el antivirus; en ese caso, añade la "
+            "carpeta del programa a sus exclusiones.",
+        "update_failed_download": "Descargar manualmente",
         "update_ask_no_remind": "No recordar esta actualización",
         "update_yes": "Sí",
         "update_no": "No",
@@ -3189,7 +3269,7 @@ I18N = {
         "sound_default": "Como el general",
         "sound_channel_default": "Sonido del canal",
         "sound_off": "Apagado",
-        "alerts_log_btn": "Registro",
+        "alerts_log_btn": "Disparos",
         "alerts_log_title": "Historial de alertas",
         "alerts_log_empty": "Aún no hay alertas.",
         "alerts_log_col_time": "Hora",
@@ -3271,7 +3351,7 @@ I18N = {
         "reply_label": "Réponse :",
         "ctx_reply": "Répondre",
         "btn_start": "▶ Démarrer",
-        "btn_stop": "■ Arrêter",
+        "btn_stop": "■ Pause",
         "btn_clear": "Tout effacer",
         "btn_search": "🔍 Chercher",
         "btn_dig": "🕑 Passé",
@@ -3309,6 +3389,12 @@ I18N = {
         "backend_mymemory": "traduction : service de secours",
         "backend_fallback": "traduction : Google en pause, service de secours",
         "backend_unknown": "traduction : aucune donnée",
+        "backend_waiting": "traducteur prêt, en attente de messages",
+        "backend_off": "traduction désactivée (case à cocher)",
+        "chat_empty_hint": "Surveillance des journaux… Écrivez quelque chose dans le canal « {ch} » en jeu — la traduction apparaîtra ici.",
+        "reply_placeholder": "Votre réponse…",
+        "reply_result_placeholder": "la traduction apparaît ici (et est copiée dans le presse-papiers)",
+        "reply_tt": "Écrivez votre réponse ici dans votre langue — la traduction apparaît à droite (et est copiée si l'option est activée).",
         "watcher_restarted": "Observateur redémarré après un plantage (voir le "
                              "log)",
         "worker_restarted": "Traducteur redémarré après un plantage (voir le "
@@ -3321,6 +3407,7 @@ I18N = {
         "tray_quit": "Quitter",
         "opt_auto_update": "Télécharger et installer les mises à jour "
                           "automatiquement",
+        "opt_gap": "Ligne vide séparant les messages",
         "update_dl_title": "Mise à jour du traducteur",
         "update_ask_title": "Nouvelle version disponible",
         "update_ask_msg": "Version {new} disponible (vous avez {cur}).\n"
@@ -3332,6 +3419,13 @@ I18N = {
         "update_download_failed": "Impossible de télécharger la mise à jour. \n"
                                "Vérifiez la connexion et réessayez.",
         "update_ask_no_remind": "Ne plus me rappeler cette mise à jour",
+        "update_failed_notice":
+            "La mise à jour vers la version {ver} ne s'est pas installée — "
+            "le programme fonctionne toujours avec l'ancienne version, tout "
+            "va bien.\n"
+            "Si cela se reproduit, c'est peut-être l'antivirus — ajoutez "
+            "alors le dossier du programme à ses exclusions.",
+        "update_failed_download": "Télécharger manuellement",
         "update_yes": "Oui",
         "update_no": "Non",
         "update_downloading": "Téléchargement de la version v{ver}…\n"
@@ -3384,7 +3478,7 @@ I18N = {
         "sound_default": "Comme le réglage général",
         "sound_channel_default": "Son du canal",
         "sound_off": "Désactivé",
-        "alerts_log_btn": "Journal",
+        "alerts_log_btn": "Déclenchements",
         "alerts_log_title": "Journal des alertes",
         "alerts_log_empty": "Aucune alerte pour le moment.",
         "alerts_log_col_time": "Heure",
@@ -3460,7 +3554,7 @@ I18N = {
         "reply_label": "回复：",
         "ctx_reply": "回复",
         "btn_start": "▶ 开始",
-        "btn_stop": "■ 停止",
+        "btn_stop": "■ 暂停",
         "btn_clear": "全部清除",
         "btn_search": "🔍 搜索",
         "btn_dig": "🕑 过去",
@@ -3495,6 +3589,12 @@ I18N = {
         "backend_mymemory": "翻译：备用服务",
         "backend_fallback": "翻译：Google 暂停中，使用备用服务",
         "backend_unknown": "翻译：无数据",
+        "backend_waiting": "翻译器就绪，等待消息",
+        "backend_off": "翻译已关闭（复选框）",
+        "chat_empty_hint": "正在监视日志… 请在游戏中向“{ch}”频道发送消息，翻译会显示在这里。",
+        "reply_placeholder": "输入回复内容…",
+        "reply_result_placeholder": "翻译会显示在这里（并复制到剪贴板）",
+        "reply_tt": "在此用您的语言输入回复 — 右侧会显示翻译（若开启选项还会复制到剪贴板）。",
         "watcher_restarted": "监视器崩溃后已重启（见调试日志）",
         "worker_restarted": "翻译器崩溃后已重启（见调试日志）",
         "msg_untranslated": "（无法翻译）",
@@ -3504,6 +3604,7 @@ I18N = {
         "tray_show": "显示",
         "tray_quit": "退出",
         "opt_auto_update": "自动下载并安装更新",
+        "opt_gap": "消息之间的空分隔行",
         "update_dl_title": "翻译器更新",
         "update_ask_title": "新版本可用",
         "update_ask_msg": "新版本 {new} 可用（当前 {cur}）。\n立即下载并安装？",
@@ -3512,6 +3613,10 @@ I18N = {
         "update_check_failed": "检查更新失败。\n请检查网络连接。",
         "update_download_failed": "下载更新失败。\n"
                                "请检查网络连接后重试。",
+        "update_failed_notice":
+            "更新到版本 {ver} 未能安装——程序仍在运行旧版本，一切正常。\n"
+            "如果再次发生，可能是杀毒软件阻止——请将程序文件夹加入其排除列表。",
+        "update_failed_download": "手动下载",
         "update_ask_no_remind": "不再提醒此更新",
         "update_yes": "是",
         "update_no": "否",
@@ -3560,7 +3665,7 @@ I18N = {
         "sound_default": "同全局",
         "sound_channel_default": "频道声音",
         "sound_off": "关闭",
-        "alerts_log_btn": "日志",
+        "alerts_log_btn": "触发记录",
         "alerts_log_title": "提醒记录",
         "alerts_log_empty": "暂无提醒。",
         "alerts_log_col_time": "时间",
@@ -3643,6 +3748,28 @@ def run_gui():
                   + "".join(traceback.format_tb(tb)))
     root.report_callback_exception = _tk_error
 
+    # ---------------- маркер неудачного обновления ----------------
+    # Помощник обновления при откате возвращает старую копию exe, перезапускает
+    # её и кладёт рядом маркер <exe>.update_failed с номером желаемой версии.
+    # Показываем тихую плашку над статусной строкой (не модальный диалог —
+    # тревожное окно при старте пугает далёких от IT пользователей): нейтральный
+    # тон, без слов про удаление файлов, со ссылкой на страницу загрузки.
+    def check_update_failure_marker():
+        if not getattr(sys, "frozen", False):
+            return
+        marker = sys.executable + ".update_failed"
+        try:
+            with open(marker, "r", encoding="utf-8", errors="replace") as f:
+                attempted = f.read().strip()
+            os.remove(marker)
+        except OSError:
+            return
+        try:
+            show_update_failure_note(attempted or "?")
+        except Exception as exc:
+            log_debug(f"маркер неудачного обновления: {exc!r}")
+    root.after(400, check_update_failure_marker)
+
     stop_event = threading.Event()
     state = {"running": False, "watchers": [], "worker": None,
              "raw": queue.Queue(), "done": queue.Queue()}
@@ -3661,8 +3788,11 @@ def run_gui():
             return cls[0].get("name") or cls[0].get("path", "")
         return ", ".join(c.get("name") or c.get("path", "") for c in cls)
 
-    ttk.Label(top, textvariable=clients_var, foreground="#555555").pack(
-        side="left", padx=6)
+    # сама подпись клиента кликабельна — ведёт туда же, что «Клиенты…»
+    cl_lbl = ttk.Label(top, textvariable=clients_var, foreground="#555555",
+                       cursor="hand2")
+    cl_lbl.pack(side="left", padx=6)
+    cl_lbl.bind("<Button-1>", lambda _e: open_clients_dialog())
     ttk.Button(top, text=tr("clients_btn"),
                command=lambda: open_clients_dialog()).pack(side="left")
     ttk.Button(top, text=tr("btn_settings"),
@@ -4018,6 +4148,15 @@ def run_gui():
                 # упоминание имени персонажа — мягкий жёлтый фон сообщения
                 txt.tag_config("mention", background="#ffedad")
                 txt.tag_lower("mention")
+                # пустое состояние: подсказка вместо белого листа — приложение
+                # работает, просто в канале пока тихо. Тег-призрак снимается
+                # при первой же реальной строке (render_entry/render_past_block)
+                txt.tag_config("empty_hint", foreground="#999999",
+                               font=("Segoe UI", 9, "italic"))
+                txt.config(state="normal")
+                txt.insert("end", tr("chat_empty_hint", ch=name) + "\n",
+                           "empty_hint")
+                txt.config(state="disabled")
                 bind_copy(txt)
                 txt.bind("<Button-3>", lambda e, idx=i, ch=name:
                          chat_context_menu(e, idx, ch))
@@ -4192,6 +4331,47 @@ def run_gui():
                           foreground="#005a9e")
     reply_out.pack(side="left", fill="x", expand=True)
 
+    # плейсхолдеры: пока поле пустое — серая подсказка, что сюда писать.
+    # Снимается фокусом (ввод) или первым результатом (вывод перевода).
+    def _placeholder_install(entry, var, text):
+        holder = {"on": False}
+
+        def show():
+            if not var.get():
+                holder["on"] = True
+                entry.config(foreground="#999999")
+                var.set(text)
+
+        def hide(_evt=None):
+            if holder["on"]:
+                holder["on"] = False
+                var.set("")
+                entry.config(foreground="#000000")
+
+        entry.bind("<FocusIn>", hide)
+        entry.bind("<FocusOut>", lambda _e: show())
+        show()
+        return holder, hide
+
+    _ph_in, _ph_in_hide = _placeholder_install(
+        reply_entry, reply_var, tr("reply_placeholder"))
+    widget_tooltip(reply_entry, lambda: tr("reply_tt"))
+
+    reply_out_ph = {"on": False}
+
+    def reply_out_placeholder():
+        reply_out_ph["on"] = True
+        reply_out.config(foreground="#999999")
+        reply_out_var.set(tr("reply_result_placeholder"))
+
+    def reply_out_clear_placeholder():
+        if reply_out_ph["on"]:
+            reply_out_ph["on"] = False
+            reply_out_var.set("")
+        reply_out.config(foreground="#005a9e")
+
+    reply_out_placeholder()
+
     reply_state = {"after": None, "seq": 0}
 
     def reply_langs():
@@ -4241,6 +4421,7 @@ def run_gui():
     def reply_show_result(text, result, seq):
         if seq != reply_state["seq"]:
             return          # устаревший запрос — текст уже изменился
+        reply_out_clear_placeholder()
         if result is None:
             reply_out_var.set(tr("status_translate_fail"))
             return
@@ -4255,13 +4436,15 @@ def run_gui():
             pass
 
     def reply_on_change(*_args):
+        if _ph_in["on"]:
+            return          # серая подсказка-плейсхолдер — не переводим её
         text = reply_var.get().strip()
         reply_state["seq"] += 1
         if reply_state["after"] is not None:
             root.after_cancel(reply_state["after"])
             reply_state["after"] = None
         if not text:
-            reply_out_var.set("")
+            reply_out_placeholder()
             return
         # переводим через 0,7 с после последней введённой буквы
         reply_state["after"] = root.after(
@@ -4273,6 +4456,26 @@ def run_gui():
     # ---------------- нижняя панель ----------------
     bottom = ttk.Frame(root)
     bottom.pack(fill="x", padx=8, pady=(2, 8))
+    # плашка «обновление не установилось» — заранее создана, но не упакована:
+    # появится только если при старте найдётся маркер отката от помощника
+    upd_note = ttk.Frame(root)
+
+    def show_update_failure_note(ver):
+        """Тихое уведомление вместо модального диалога: факт без тревоги,
+        ссылка на страницу загрузки, крестик скрывает плашку насовсем."""
+        ttk.Label(upd_note, text=tr("update_failed_notice", ver=ver),
+                  foreground="#8a6d1d", wraplength=520,
+                  justify="left").pack(side="left", fill="x", expand=True)
+        dl = tk.Label(upd_note, text=tr("update_failed_download"),
+                      fg="#005a9e", cursor="hand2",
+                      font=("Segoe UI", 9, "underline"))
+        dl.pack(side="left", padx=(8, 4))
+        dl.bind("<Button-1>",
+                lambda _e: os.startfile(RELEASES_PAGE))
+        close = tk.Label(upd_note, text="✕", cursor="hand2", fg="#999999")
+        close.pack(side="left", padx=(2, 0))
+        close.bind("<Button-1>", lambda _e: upd_note.destroy())
+        upd_note.pack(fill="x", padx=8, pady=(2, 0), before=bottom)
     # два ряда: статус — отдельно, чтобы длинный текст статуса не вытеснял
     # кнопки поиска/раскопок за край окна на узкой ширине
     status_row = ttk.Frame(bottom)
@@ -4281,11 +4484,9 @@ def run_gui():
     controls_row.pack(fill="x", pady=(2, 0))
     status_var = tk.StringVar(value=tr("status_stopped"))
     ttk.Label(status_row, textvariable=status_var).pack(side="left")
-    # номер версии — тихий уголок справа; рядом неприметная ссылка на словарь.
-    # Словарь — механизм пост-обработки только для русского направления,
+    # номер версии — только в заголовке окна. Рядом неприметная ссылка
+    # на словарь: словарь — пост-обработка только русского направления,
     # поэтому ссылку показываем лишь когда перевод идёт на русский.
-    ttk.Label(status_row, text=f"v{APP_VERSION}",
-              foreground="#999999").pack(side="right", padx=(4, 0))
     if target_lang == "ru":
         glossary_link = tk.Label(status_row, text=tr("glossary_link"), fg="#7a9cc4",
                                  cursor="hand2", font=("Segoe UI", 8))
@@ -4413,8 +4614,16 @@ def run_gui():
 
     HISTORY_MAX = 1000   # сколько сообщений хранить по каждому каналу
 
+    def drop_empty_hint(txt):
+        """Снять подсказку пустого состояния — появилась реальная строка."""
+        if txt.tag_ranges("empty_hint"):
+            txt.delete("empty_hint.first", "empty_hint.last")
+
     def render_entry(txt, entry):
         """Вставить одно сообщение в виджет с учётом текущих галочек."""
+        drop_empty_hint(txt)
+        # пустая строка-разделитель между сообщениями — опция из настроек
+        gap = "\n" if cfg.get("gap_lines", True) else ""
         t, name, original, translated, _src = entry
         # запоминаем строку, с которой начнётся запись — по ней ПКМ найдёт её
         start_line = int(str(txt.index("end-1c")).split(".")[0])
@@ -4439,7 +4648,7 @@ def run_gui():
             txt.insert("end", original + "\n", "orig")
             if tr_var.get() and original:
                 txt.insert("end", tr("msg_untranslated") + "\n", "err")
-            txt.insert("end", "\n")
+            txt.insert("end", gap)
         elif translated == original:
             # сообщение без перевода (уже на языке, языковой канал «как есть»)
             # — пустую строку-разделитель не добавляем, интервал не нужен
@@ -4447,10 +4656,10 @@ def run_gui():
         elif orig_var.get():
             txt.insert("end", original + "\n", "orig")
             txt.insert("end", translated + "\n")
-            txt.insert("end", "\n")
+            txt.insert("end", gap)
         else:
             txt.insert("end", translated + "\n")    # только перевод
-            txt.insert("end", "\n")
+            txt.insert("end", gap)
         if mention:
             txt.tag_add("mention", f"{start_line}.0", "end-1c")
 
@@ -4461,6 +4670,7 @@ def run_gui():
     def render_past_entry(txt, entry):
         """Одно сообщение «прошлого»: тот же вид, что у render_entry, но всё
         со стилем past — сразу ясно, что строка не из текущего потока."""
+        gap = "\n" if cfg.get("gap_lines", True) else ""
         t, name, original, translated, _src = entry
         if t:
             txt.insert("end", f"[{t}] ", ("time", "past"))
@@ -4473,13 +4683,14 @@ def run_gui():
         elif orig_var.get():
             txt.insert("end", original + "\n", ("orig", "past"))
             txt.insert("end", translated + "\n", "past")
-            txt.insert("end", "\n", "past")
+            txt.insert("end", gap, "past")
         else:
             txt.insert("end", translated + "\n", "past")
-            txt.insert("end", "\n", "past")
+            txt.insert("end", gap, "past")
 
     def render_past_block(txt, block):
         """Заголовок + строки блока «прошлого» в конец виджета."""
+        drop_empty_hint(txt)
         if block.get("header"):
             txt.insert("end", block["header"] + "\n", "past_head")
         for entry in block.get("entries") or []:
@@ -4498,14 +4709,19 @@ def run_gui():
         txt.delete("1.0", "end")
         entry_starts[txt] = []
         block = past.get((client_idx, channel))
-        if block and block.get("pos") == "start" and \
-                (block.get("entries") or block.get("header")):
+        has_past = bool(block and (block.get("entries")
+                                   or block.get("header")))
+        if block and block.get("pos") == "start" and has_past:
             render_past_block(txt, block)
-        for entry in history.get((client_idx, channel), []):
+        entries = history.get((client_idx, channel)) or []
+        for entry in entries:
             render_entry(txt, entry)
-        if block and block.get("pos") == "end" and \
-                (block.get("entries") or block.get("header")):
+        if block and block.get("pos") == "end" and has_past:
             render_past_block(txt, block)
+        if not entries and not has_past:
+            # канал пуст — вернуть подсказку (перерисовка её стёрла)
+            txt.insert("end", tr("chat_empty_hint", ch=channel) + "\n",
+                       "empty_hint")
         if at_end or not tab_visible(client_idx, channel):
             txt.see("end")
         else:
@@ -4738,7 +4954,9 @@ def run_gui():
                     txt.config(state="disabled")
                 else:
                     rebuild_channel(client_idx, channel)
-        elif client_idx < len(clients_ui):
+        # новое сообщение показываем ВСЕГДА — и при переполнении тоже
+        # (иначе канал «замирал» на лимите: старые удалялись, новые не шли)
+        if client_idx < len(clients_ui):
             txt, _ = clients_ui[client_idx]["tabs"][channel]
             # автопрокрутка только если пользователь уже внизу; если он
             # прокручен вверх и читает старое — позицию не трогаем
@@ -4894,8 +5112,10 @@ def run_gui():
             now = time.monotonic()
             if state.get("running") and now - state.get("status_at", 0) > 5:
                 state["status_at"] = now
-                status_var.set(tr("status_running", n=state.get("count", 0),
-                                  backend=translator_status_text()))
+                status_var.set(tr(
+                    "status_running", n=state.get("count", 0),
+                    backend=translator_status_text(
+                        state.get("count", 0), bool(tr_var.get()))))
             # команды из трея (потокобезопасно: только tk-виджеты)
             try:
                 while True:
@@ -4932,8 +5152,10 @@ def run_gui():
                 noted = append_to(client_idx, channel, t, name, body,
                                   translated, src_lang)
                 state["count"] = state.get("count", 0) + 1
-                status_var.set(tr("status_running", n=state["count"],
-                                  backend=translator_status_text()))
+                status_var.set(tr(
+                    "status_running", n=state["count"],
+                    backend=translator_status_text(
+                        state["count"], bool(tr_var.get()))))
                 if channel_flag(cfg.get("sound_channels"), channel) \
                         and not alert_state["sound"]:
                     play_sound(channel_sound_path(channel))
@@ -5147,7 +5369,7 @@ def run_gui():
                 else:
                     offer_update(latest)    # крайний случай — страница релизов
                 return
-            if not spawn_update_helper(exe, tmp):
+            if not spawn_update_helper(exe, tmp, newer):
                 try:
                     win.destroy()
                 except tk.TclError:
@@ -5177,6 +5399,7 @@ def run_gui():
         cur_var = tk.BooleanVar(value=bool(cfg.get("translate_currency", True)))
         copy_var = tk.BooleanVar(value=bool(cfg.get("auto_copy_reply", True)))
         upd_var = tk.BooleanVar(value=bool(cfg.get("auto_update")))
+        gap_var = tk.BooleanVar(value=bool(cfg.get("gap_lines", True)))
         snd_ids = list(BUILTIN_SOUNDS)
         snd_names = [tr(f"snd_{s}") for s in snd_ids]
         cur_snd = cfg.get("sound") or "beep"
@@ -5189,6 +5412,11 @@ def run_gui():
             cfg["auto_copy_reply"] = bool(copy_var.get())
             cfg["auto_update"] = bool(upd_var.get())
             save_config(cfg)
+
+        def apply_gap():
+            cfg["gap_lines"] = bool(gap_var.get())
+            save_config(cfg)
+            refresh_view()      # отступ применяется и к уже выведенным строкам
 
         def apply_sound(_e=None):
             cfg["sound"] = snd_ids[snd_names.index(snd_var.get())] \
@@ -5209,6 +5437,9 @@ def run_gui():
         ttk.Checkbutton(box, text=tr("opt_auto_update"),
                         variable=upd_var, command=apply).pack(anchor="w",
                                                             pady=2)
+        ttk.Checkbutton(box, text=tr("opt_gap"),
+                        variable=gap_var, command=apply_gap).pack(anchor="w",
+                                                                  pady=2)
         # ручная проверка: результат — сообщение (нет новее / ошибка сети)
         # или тот же вопрос про скачивание, что и при автопроверке
         ttk.Button(box, text=tr("btn_check_updates"),
@@ -5291,17 +5522,20 @@ def run_gui():
         import tkinter.messagebox as mb
         win = tk.Toplevel(root)
         win.title(tr("dlg_clients_title"))
-        win.geometry("640x410")
+        win.geometry("680x440")
         win.transient(root)
-        win.minsize(480, 260)
+        win.minsize(520, 300)
 
         tree = ttk.Treeview(win, columns=("name", "path"), show="headings",
                             height=10, selectmode="extended")
         tree.heading("name", text=tr("col_name"))
         tree.heading("path", text=tr("col_path"))
-        tree.column("name", width=150, anchor="w")
-        tree.column("path", width=440, anchor="w")
+        # имя — фиксированной ширины, путь растягивается вместе с окном
+        tree.column("name", width=150, anchor="w", stretch=False)
+        tree.column("path", width=440, anchor="w", stretch=True)
         tree.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        # ручка растягивания в углу — явный призыв «окно тянется»
+        ttk.Sizegrip(win).place(relx=1.0, rely=1.0, anchor="se")
 
         # панель правки выбранной строки: имя и путь редактируются здесь
         # (двойной щелчок по строке тоже подгружает её в поля)
@@ -5323,9 +5557,17 @@ def run_gui():
                    command=lambda: apply_row()).grid(row=1, column=3,
                                                      padx=(6, 0), pady=(4, 0))
         edit.columnconfigure(1, weight=1)
-        ttk.Label(edit, text=tr("clients_edit_hint"),
-                  foreground="#777777", wraplength=560).grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        hint_lbl = ttk.Label(edit, text=tr("clients_edit_hint"),
+                             foreground="#777777", wraplength=560)
+        hint_lbl.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        def _fit_hint(_e=None):
+            # подсказка переносится по ширине окна — окно растягиваемо
+            try:
+                hint_lbl.config(wraplength=max(280, win.winfo_width() - 60))
+            except tk.TclError:
+                pass
+        win.bind("<Configure>", _fit_hint)
 
         def selected_iid():
             sel = tree.selection()
@@ -5367,22 +5609,25 @@ def run_gui():
             dlg = tk.Toplevel(win)
             dlg.title(tr("pick_title"))
             dlg.transient(win)
-            dlg.resizable(False, False)
+            dlg.geometry("680x460")
+            dlg.minsize(520, 320)
+            dlg.resizable(True, True)
             box = ttk.Frame(dlg, padding=10)
             box.pack(fill="both", expand=True)
             bar = ttk.Frame(box)
             bar.pack(fill="x")
             cur_var = tk.StringVar()
-            ttk.Entry(bar, textvariable=cur_var, width=52).pack(side="left")
+            # строка пути занимает всю свободную ширину верхней панели
+            ttk.Entry(bar, textvariable=cur_var).pack(side="left", fill="x",
+                                                      expand=True)
             ttk.Button(bar, text=tr("pick_up"),
                        command=lambda: navigate(up=True)).pack(side="left",
                                                                padx=(6, 0))
-            lst = tk.Listbox(box, width=64, height=14,
-                             font=("Segoe UI", 9))
+            lst = tk.Listbox(box, font=("Segoe UI", 9))
             lst.pack(fill="both", expand=True, pady=(8, 4))
-            cur_status = ttk.Label(box, wraplength=430, justify="left")
+            cur_status = ttk.Label(box, justify="left")
             cur_status.pack(anchor="w")
-            sel_status = ttk.Label(box, wraplength=430, justify="left")
+            sel_status = ttk.Label(box, justify="left")
             sel_status.pack(anchor="w", pady=(2, 0))
             row = ttk.Frame(box)
             row.pack(fill="x", pady=(8, 0))
@@ -5390,6 +5635,18 @@ def run_gui():
                        command=lambda: choose()).pack(side="right")
             ttk.Button(row, text=tr("dig_cancel"),
                        command=dlg.destroy).pack(side="right", padx=(0, 8))
+            # ручка растягивания в углу — явный призыв «окно тянется»
+            ttk.Sizegrip(dlg).place(relx=1.0, rely=1.0, anchor="se")
+
+            def _fit_wraps(_e=None):
+                # статусные строки переносятся по ширине окна
+                try:
+                    w = max(280, dlg.winfo_width() - 40)
+                    cur_status.config(wraplength=w)
+                    sel_status.config(wraplength=w)
+                except tk.TclError:
+                    pass
+            dlg.bind("<Configure>", _fit_wraps)
 
             def show_status(label, path):
                 text, color = logs_status(path)
@@ -6490,7 +6747,7 @@ def self_test():
     # скрипт помощника автообновления: пути экранированы, все шаги на месте
     try:
         s = build_update_script(r"C:\My Apps\WCT.exe",
-                                r"C:\My Apps\WCT.exe.update", 1234)
+                                r"C:\My Apps\WCT.exe.update", 1234, "9.9.9")
         good = ("Wait-Process -Id 1234" in s
                 and "byte[] 2" in s
                 and "$head[0] -eq 77" in s
@@ -6502,6 +6759,10 @@ def self_test():
                 and "$proc.HasExited" in s
                 and "MainWindowTitle -eq 'Error'" in s
                 and "$attempt -lt 3" in s
+                # откат — не молча: маркер неудачи + перезапуск старой копии
+                and "Set-Content -LiteralPath "
+                    "'C:\\My Apps\\WCT.exe.update_failed'" in s
+                and "Start-Process 'C:\\My Apps\\WCT.exe' }" in s
                 and "if (-not $ok)" in s
                 and "catch" in s)
         ok &= good
@@ -6550,6 +6811,25 @@ def self_test():
     except Exception as exc:
         ok = False
         print(f"  [FAIL] автообновление: разбор API: {exc}")
+    # статус переводчика: вместо «нет данных» — понятные состояния
+    try:
+        _saved_be = TRANSLATOR_STATE.get("backend")
+        TRANSLATOR_STATE["backend"] = None
+        good = (translator_status_text(0, True) == tr("backend_waiting")
+                and translator_status_text(5, True) == tr("backend_unknown")
+                and translator_status_text(5, False) == tr("backend_off"))
+        TRANSLATOR_STATE["backend"] = "gtx"
+        good = good and translator_status_text(5, True) == tr("backend_gtx")
+        if _saved_be is None:
+            TRANSLATOR_STATE.pop("backend", None)
+        else:
+            TRANSLATOR_STATE["backend"] = _saved_be
+        ok &= good
+        print(f"  [{'OK ' if good else 'FAIL'}] статус переводчика: ожидание / "
+              f"выключен / активен")
+    except Exception as exc:
+        ok = False
+        print(f"  [FAIL] статус переводчика: {exc}")
     # i18n: у всех языков полный набор ключей, названия — на родных языках
     try:
         ref = set(I18N["ru"])

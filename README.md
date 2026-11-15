@@ -46,6 +46,8 @@
 
 ## Что нового
 
+**[v1.7.7.14](../../releases/tag/v1.7.7.14)** — исправлено зависание канала: когда в окне накапливалось 1000 сообщений, новые переставали появляться (Event набирает их быстро). Теперь самые старые строки удаляются, и чат продолжает работать. Если обновление не устанавливается, программа больше не «молча» остаётся старой: прежняя версия возвращается и перезапускается, а внизу окна появляется спокойная плашка с объяснением и ссылкой «Скачать вручную». Новая опция в настройках: «Пустая строка-разделитель между сообщениями». Окна «Клиенты» и «Выбор папки логов» теперь растягиваются за уголок. Мелочи: подсказка в пустом канале, понятный статус переводчика внизу окна, клик по имени клиента вверху открывает «Клиенты».
+
 **[v1.7.7.9](../../releases/tag/v1.7.7.9)** — автообновление теперь переживает капризы антивируса: если первый запуск новой версии упал или показал ошибку загрузки DLL, помощник сам перезапускает её (до трёх попыток) — старая версия возвращается, только если ничего не помогло.
 
 **[v1.7.7.8](../../releases/tag/v1.7.7.8)** — автообновление стало надёжнее: скачанный файл сверяется по точному размеру с GitHub и заголовку exe, битый файл не подменит рабочий. Если после обновления новая версия не запускается (падение или ошибка загрузки) — старая возвращается автоматически.
@@ -184,6 +186,8 @@ Tradutor de chats para o jogo **Wurm Online**. Acompanha os logs de texto do jog
 - Proteção integrada contra travamento das threads (auto-reinício do observador), log de depuração
 
 ## Novidades
+
+**[v1.7.7.14](../../releases/tag/v1.7.7.14)** — corrigido o travamento do canal: quando a janela acumulava 1000 mensagens, as novas paravam de aparecer (o Event as acumula rápido). Agora as linhas mais antigas são apagadas e o chat continua funcionando. Se a atualização não for instalada, o programa não fica mais «silenciosamente» na versão antiga: a versão anterior volta e reinicia, e uma faixa tranquila aparece no rodapé com uma explicação e o link «Baixar manualmente». Nova opção nas configurações: «Linha em branco separando as mensagens». As janelas «Клиенты» e «Выбор папки логов» agora podem ser redimensionadas pelo canto. Pequenas coisas: dica no canal vazio, status compreensível do tradutor no rodapé, clique no nome do cliente no topo abre «Клиенты».
 
 **[v1.7.7.9](../../releases/tag/v1.7.7.9)** — a atualização automática agora sobrevive às birras do antivírus: se a primeira execução da nova versão cair ou mostrar erro de carregamento da DLL, o assistente a reinicia sozinho (até 3 tentativas) — a versão anterior só volta se nada resolver.
 
